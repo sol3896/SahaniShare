@@ -77,20 +77,26 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_donation'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SahaniShare - Add New Donation</title>
+    <title>SahaniShare - [Your Page Title Here]</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Inter Font -->
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- Google Fonts: Inter for body, Montserrat for headings -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
+
     <!-- Font Awesome for Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <!-- Link to external style.css -->
     <link rel="stylesheet" href="style.css">
+    <!-- Inline style to apply Inter as base font (Montserrat is applied in style.css for headings) -->
     <style>
         body {
             font-family: 'Inter', sans-serif;
             @apply bg-gray-100 text-gray-800;
         }
+        /* No need for h1, h2, h3 styles here, they are in style.css now */
     </style>
 </head>
 <body class="min-h-screen flex flex-col">
