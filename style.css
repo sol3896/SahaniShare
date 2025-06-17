@@ -1,0 +1,51 @@
+/* style.css - SahaniShare Global Styles */
+
+/* Custom Colors based on request */
+.bg-primary-green { background-color: #4CAF50; }
+.text-primary-green { color: #4CAF50; }
+.hover\:bg-primary-green-dark:hover { background-color: #388E3C; }
+
+.bg-accent-orange { background-color: #FF9800; }
+.text-accent-orange { color: #FF9800; }
+.hover\:bg-accent-orange-dark:hover { background-color: #F57C00; }
+
+.bg-neutral-light { background-color: #EEEEEE; }
+.text-neutral-dark { color: #424242; }
+
+/* Reusable Button Styles */
+.btn-primary {
+    @apply bg-primary-green text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:bg-primary-green-dark transition duration-300 ease-in-out w-full;
+}
+.btn-secondary {
+    @apply bg-accent-orange text-white font-semibold py-3 px-6 rounded-lg shadow-md hover:bg-accent-orange-dark transition duration-300 ease-in-out w-full;
+}
+
+/* Card Styling */
+.card {
+    @apply bg-white rounded-xl shadow-lg p-6 md:p-8;
+}
+
+/* Form Input Styling */
+input[type="text"],
+input[type="email"],
+input[type="password"],
+input[type="number"],
+input[type="datetime-local"], /* Changed from type="date" to handle both date and time */
+textarea,
+select {
+    @apply w-full p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-green transition duration-200;
+}
+
+/* Status Tags for Donations/Requests */
+.status-tag {
+    @apply text-xs font-semibold px-2 py-1 rounded-full;
+}
+.status-pending { @apply bg-accent-orange text-white; }
+.status-approved { @apply bg-primary-green text-white; }
+.status-fulfilled { @apply bg-green-700 text-white; }
+.status-rejected { @apply bg-red-500 text-white; }
+
+/* Mobile Menu Specific Styles */
+.mobile-menu-open {
+    transform: translateX(0);
+}
