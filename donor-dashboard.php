@@ -31,11 +31,12 @@ while ($row = $result->fetch_assoc()) {
 $stmt->close();
 
 // --- Fetch Recipient Feedback ---
-// This is more complex as it requires joining with requests and potentially users table for organization name
+// This query fetches feedback given by recipients for donations made by this donor.
 $stmt = $conn->prepare("
-    SELECT f.comment, f.rating, u.organization_name
+    SELECT f.comment, f.rating, u.organization_name as recipient_org_name
     FROM feedback f
-    JOIN donations d ON f.donation_id = d.id
+    JOIN requests r ON f.donation_id = r.donation_id AND f.recipient_id = r.recipient_id -- Link feedback to specific request for donation
+    JOIN donations d ON r.donation_id = d.id
     JOIN users u ON f.recipient_id = u.id
     WHERE d.donor_id = ?
     ORDER BY f.created_at DESC LIMIT 2
@@ -55,7 +56,7 @@ $conn->close();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SahaniShare - [Your Page Title Here]</title>
+    <title>SahaniShare - Donor Dashboard</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
 
@@ -91,8 +92,8 @@ $conn->close();
         <nav class="hidden md:flex space-x-6">
             <a href="donor-dashboard.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Dashboard</a>
             <a href="add-donation.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Add Donation</a>
-            <a href="donor-dashboard.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">History</a>
-            <a href="donor-dashboard.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Profile</a>
+            <a href="donor-history.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">History</a>
+            <a href="#" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Profile</a>
             <a href="logout.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Logout</a>
         </nav>
         <!-- Mobile Hamburger Icon -->
@@ -113,6 +114,8 @@ $conn->close();
                 <li><a href="login-register.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Login/Register</a></li>
                 <li><a href="donor-dashboard.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Donor Dashboard</a></li>
                 <li><a href="add-donation.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Add Donation</a></li>
+                <li><a href="donor-history.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">History</a></li>
+                <li><a href="#" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Profile</a></li>
                 <li><a href="recipient-dashboard.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Recipient Dashboard</a></li>
                 <li><a href="admin-panel.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Admin Panel</a></li>
                 <li><a href="reports.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Reports</a></li>
@@ -134,9 +137,9 @@ $conn->close();
                     <i class="fas fa-plus mr-2"></i> Add New Donation
                 </a>
                 <div class="flex flex-col space-y-2">
-                    <a href="donor-dashboard.php#recent-donations" class="text-primary-green hover:underline font-medium"><i class="fas fa-clipboard-list mr-2"></i> View Donation History</a>
-                    <a href="donor-dashboard.php#pending-approvals" class="text-primary-green hover:underline font-medium"><i class="fas fa-hourglass-half mr-2"></i> Check Pending Approvals</a>
-                    <a href="donor-dashboard.php#recipient-feedback" class="text-primary-green hover:underline font-medium"><i class="fas fa-comments mr-2"></i> View Recipient Feedback</a>
+                    <a href="donor-history.php" class="text-primary-green hover:underline font-medium"><i class="fas fa-clipboard-list mr-2"></i> View Donation History</a>
+                    <a href="admin-panel.php?view=donations&filter=pending" class="text-primary-green hover:underline font-medium"><i class="fas fa-hourglass-half mr-2"></i> Check Pending Approvals</a>
+                    <a href="#" class="text-primary-green hover:underline font-medium"><i class="fas fa-comments mr-2"></i> View Recipient Feedback</a>
                 </div>
             </div>
 
@@ -167,7 +170,7 @@ $conn->close();
                         <?php endforeach; ?>
                     <?php endif; ?>
                 </div>
-                <a href="#" class="text-primary-green hover:underline font-medium block mt-4 text-right">View All History <i class="fas fa-arrow-right ml-1"></i></a>
+                <a href="donor-history.php" class="text-primary-green hover:underline font-medium block mt-4 text-right">View All History <i class="fas fa-arrow-right ml-1"></i></a>
             </div>
 
             <!-- Recipient Feedback Card -->
@@ -180,7 +183,7 @@ $conn->close();
                         <?php foreach ($recipient_feedback as $feedback): ?>
                             <div class="border-b pb-3 border-gray-200 last:border-b-0 last:pb-0">
                                 <p class="italic text-gray-700">"<?php echo htmlspecialchars($feedback['comment']); ?>"</p>
-                                <p class="text-sm text-gray-500 mt-1">- <?php echo htmlspecialchars($feedback['organization_name']); ?>
+                                <p class="text-sm text-gray-500 mt-1">- <?php echo htmlspecialchars($feedback['recipient_org_name']); ?>
                                     <span class="text-accent-orange">
                                         <?php for ($i = 0; $i < $feedback['rating']; $i++): ?><i class="fas fa-star"></i><?php endfor; ?>
                                         <?php for ($i = $feedback['rating']; $i < 5; $i++): ?><i class="far fa-star"></i><?php endfor; ?>
@@ -220,4 +223,3 @@ $conn->close();
     </script>
 </body>
 </html>
-
