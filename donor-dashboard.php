@@ -93,6 +93,7 @@ $conn->close();
             <a href="donor-dashboard.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Dashboard</a>
             <a href="add-donation.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Add Donation</a>
             <a href="donor-history.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">History</a>
+            <a href="donor-requests.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Requests</a>
             <a href="#" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Profile</a>
             <a href="logout.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Logout</a>
         </nav>
@@ -115,6 +116,7 @@ $conn->close();
                 <li><a href="donor-dashboard.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Donor Dashboard</a></li>
                 <li><a href="add-donation.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Add Donation</a></li>
                 <li><a href="donor-history.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">History</a></li>
+                <li><a href="donor-requests.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Requests</a></li>
                 <li><a href="#" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Profile</a></li>
                 <li><a href="recipient-dashboard.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Recipient Dashboard</a></li>
                 <li><a href="admin-panel.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Admin Panel</a></li>
@@ -138,7 +140,7 @@ $conn->close();
                 </a>
                 <div class="flex flex-col space-y-2">
                     <a href="donor-history.php" class="text-primary-green hover:underline font-medium"><i class="fas fa-clipboard-list mr-2"></i> View Donation History</a>
-                    <a href="admin-panel.php?view=donations&filter=pending" class="text-primary-green hover:underline font-medium"><i class="fas fa-hourglass-half mr-2"></i> Check Pending Approvals</a>
+                    <a href="donor-requests.php" class="text-primary-green hover:underline font-medium"><i class="fas fa-inbox mr-2"></i> View Incoming Requests</a>
                     <a href="#" class="text-primary-green hover:underline font-medium"><i class="fas fa-comments mr-2"></i> View Recipient Feedback</a>
                 </div>
             </div>
@@ -223,3 +225,4 @@ $conn->close();
     </script>
 </body>
 </html>
+

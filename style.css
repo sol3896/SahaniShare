@@ -139,12 +139,12 @@ select:focus {
 .mobile-menu-open {
     transform: translateX(0);
 }
+/* ==== LOGIN PAGE BACKGROUND ==== */
+.login-page {
+    background: url('images/food-donation-bg.jpg') no-repeat center center fixed;
+    background-size: cover;
+}
 
 /* ==== OPTIONAL BACKGROUND PATTERN ==== */
-/*
-body {
-    background-image: url('data:image/svg+xml,...');
-    background-repeat: repeat;
-    background-size: 100px;
-}
-*/
+
+

@@ -19,7 +19,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
     $email = trim($_POST['email']);
     $password = $_POST['password'];
     $confirm_password = $_POST['confirm_password'];
-    $role = $_POST['role']; // donor, recipient, admin, moderator
+    $role = $_POST['role']; // donor, recipient
 
     // Basic validation
     if (empty($organization_name) || empty($email) || empty($password) || empty($confirm_password)) {
@@ -43,19 +43,22 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
         if ($stmt->num_rows > 0) {
             $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Email already registered. Please login or use a different email.</div>';
         } else {
-            // Insert new user into the database
-            $stmt = $conn->prepare("INSERT INTO users (organization_name, email, password_hash, role, status) VALUES (?, ?, ?, ?, ?)");
-            $status = 'pending'; // Default for new registrations (recipients, admins, moderators)
-            if ($role === 'donor') { // Donors can be active immediately
+            // Set default status based on role
+            $status = 'pending'; // Default for new registrations (recipients)
+            if ($role === 'donor' || $role === 'admin') { // Donors and directly registered admins are active immediately
                 $status = 'active';
             }
+            // For now, only donor/recipient can register here. Admin registration is manual or through specific flow.
+
+            // Insert new user into the database
+            $stmt = $conn->prepare("INSERT INTO users (organization_name, email, password_hash, role, status) VALUES (?, ?, ?, ?, ?)");
             $stmt->bind_param("sssss", $organization_name, $email, $password_hash, $role, $status);
 
             if ($stmt->execute()) {
                 $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Registration successful! Please login.</div>';
-                // For a smooth user experience, you might want to auto-login here if registration is considered 'active' by default (like for donors)
-                // If auto-login, set session vars and redirect
-                 if ($role === 'donor') {
+                
+                // Auto-login for 'donor' accounts directly (since they are active immediately)
+                if ($role === 'donor') {
                      $_SESSION['user_id'] = $conn->insert_id;
                      $_SESSION['user_email'] = $email;
                      $_SESSION['user_role'] = $role;
@@ -63,9 +66,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
                      $_SESSION['user_status'] = $status;
                      header('Location: donor-dashboard.php');
                      exit();
-                 }
-                // If not auto-logging in, just redirect back to login page
-                header('Location: login-register.php?registered=true'); // Use a GET parameter to indicate successful registration
+                }
+                
+                // For recipients (pending status), just redirect back to login page
+                header('Location: login-register.php?registered=true');
                 exit();
             } else {
                 $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error during registration: ' . htmlspecialchars($stmt->error) . '</div>';
@@ -97,42 +101,66 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
             $stmt->fetch();
 
             if (password_verify($password, $password_hash)) {
-                // Password is correct, create session variables
-                $_SESSION['user_id'] = $id;
-                $_SESSION['user_email'] = $email;
-                $_SESSION['user_role'] = $role;
-                $_SESSION['organization_name'] = $organization_name;
-                $_SESSION['user_status'] = $status; // IMPORTANT: Store the user's status
+                // Password is correct
+                // Check user status before setting full session and redirecting
+                if ($role === 'recipient' && $status !== 'active') {
+                    // Recipient account is not active, display message on login page
+                    $message_type = 'yellow';
+                    $alert_message = '';
+                    switch ($status) {
+                        case 'pending':
+                            $alert_message = 'Your recipient account is currently <strong>pending approval</strong> by an administrator. Please wait for an update.';
+                            break;
+                        case 'rejected':
+                            $alert_message = 'Your recipient account has been <strong>rejected</strong>. Please contact support for more information.';
+                            $message_type = 'red'; // Rejected should be a red alert
+                            break;
+                        case 'inactive': // Generic inactive status
+                             $alert_message = 'Your recipient account is currently <strong>inactive</strong>. Please contact support.';
+                             $message_type = 'red';
+                             break;
+                        default:
+                            $alert_message = 'Your recipient account is currently ' . htmlspecialchars($status) . '. Please wait for admin approval or contact support.';
+                            break;
+                    }
+                    $message = '<div class="bg-' . $message_type . '-100 border border-' . $message_type . '-400 text-' . $message_type . '-700 px-4 py-3 rounded-md mb-4" role="alert">' . $alert_message . '</div>';
+                    // DO NOT set full session variables here, keep them on the login page
+                } else {
+                    // Account is active or not a recipient, proceed with login
+                    $_SESSION['user_id'] = $id;
+                    $_SESSION['user_email'] = $email;
+                    $_SESSION['user_role'] = $role;
+                    $_SESSION['organization_name'] = $organization_name;
+                    $_SESSION['user_status'] = $status; // Store the user's current status from DB
 
-                // Redirect based on user role (expand this logic as needed)
-                switch ($role) {
-                    case 'donor':
-                        header('Location: donor-dashboard.php');
-                        break;
-                    case 'recipient':
-                        if ($status === 'active') { // Only redirect active recipients
+                    // Check for and display specific user approval message only on first successful active login
+                    $user_approval_message_key = 'user_status_message_' . $id;
+                    if (isset($_SESSION[$user_approval_message_key])) {
+                        $_SESSION['message'] = $_SESSION[$user_approval_message_key]; // Set message for next page
+                        unset($_SESSION[$user_approval_message_key]); // Clear it
+                    }
+
+                    // Redirect based on user role (expand this logic as needed)
+                    switch ($role) {
+                        case 'donor':
+                            header('Location: donor-dashboard.php');
+                            break;
+                        case 'recipient':
                             header('Location: recipient-dashboard.php');
-                        } else {
-                            $message = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your recipient account is currently ' . htmlspecialchars($status) . '. Please wait for admin approval.</div>';
-                            // Unset session variables if not active, so they don't persist incorrectly
+                            break;
+                        case 'admin':
+                            header('Location: admin-panel.php');
+                            break;
+                        default:
+                            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Unknown user role. Please contact support.</div>';
+                            // Clear session for unknown roles
                             session_unset();
                             session_destroy();
-                            session_start(); // Re-start a fresh session for the next attempt
-                        }
-                        break;
-                    case 'admin':
-                    case 'moderator': // Both admin and moderator go to admin panel
-                        header('Location: admin-panel.php');
-                        break;
-                    default:
-                        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Unknown user role. Please contact support.</div>';
-                        // Clear session for unknown roles
-                        session_unset();
-                        session_destroy();
-                        session_start();
-                        break;
+                            session_start();
+                            break;
+                    }
+                    exit(); // Always exit after a header redirect
                 }
-                exit(); // Always exit after a header redirect
             } else {
                 $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid password for this email.</div>';
             }
@@ -203,7 +231,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
                             <input type="radio" name="role" value="recipient" class="form-radio text-primary-green focus:ring-primary-green">
                             <span class="ml-2 text-gray-700">Recipient</span>
                         </label>
-                        <!-- Admin and Moderator roles would typically have a different, restricted registration flow -->
                     </div>
                 </div>
                 <input type="text" name="organization_name" placeholder="Organization Name (e.g., ABC Hotel)" required>
@@ -254,5 +281,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
     </script>
 </body>
 </html>
+
+
 
 

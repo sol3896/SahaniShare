@@ -1,163 +1,214 @@
 <?php
 // admin-panel.php
-session_start(); // Start the session to manage user login state
+session_start();
 
-// Include the database connection file. This file defines get_db_connection() and DB_NAME, DB_USER, DB_PASSWORD etc.
+// Include the database connection file
 include_once 'db_connection.php';
 
-// Check if the user is logged in AND has an 'admin' or 'moderator' role.
-// If not authorized, redirect them to the login page immediately.
+// Check if user is logged in and is an admin or moderator
 if (!isset($_SESSION['user_id']) || ($_SESSION['user_role'] !== 'admin' && $_SESSION['user_role'] !== 'moderator')) {
     header('Location: login-register.php');
-    exit(); // Always exit after a header redirect
+    exit();
 }
 
-// Retrieve user specific session data for display
 $user_id = $_SESSION['user_id'];
-$organization_name = $_SESSION['organization_name'];
 $user_role = $_SESSION['user_role'];
+$organization_name = $_SESSION['organization_name'];
 
-// Initialize variables for dashboard statistics and table data
-$total_donations = 0;
-$pending_approvals = 0;
-$active_users = 0;
-$display_pending_donations = []; // Used for both dashboard pending and all donations view
-$display_users = [];             // Used for user management view
+$message = ''; // To store success or error messages
+if (isset($_SESSION['message'])) {
+    $message = $_SESSION['message'];
+    unset($_SESSION['message']); // Clear the message after displaying it
+}
 
-// Establish a database connection
+$current_view = isset($_GET['view']) ? $_GET['view'] : 'dashboard'; // Default view is dashboard
+
 $conn = get_db_connection();
 
-// --- Handle POST requests for Donation Approval/Rejection ---
-// This block processes actions coming from the "Approve" or "Reject" buttons.
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action']) && isset($_POST['donation_id'])) {
-    $action = $_POST['action'];        // Value will be 'approve' or 'reject'
-    $donation_id = $_POST['donation_id']; // ID of the donation to update
-
-    $new_status = '';
-    if ($action === 'approve') {
-        $new_status = 'approved';
-    } elseif ($action === 'reject') {
-        $new_status = 'rejected';
-    } else {
-        // If an invalid action is sent, redirect with an error message.
-        header('Location: admin-panel.php?message=invalid_donation_action');
-        exit();
-    }
-
-    // Prepare an SQL statement to update the donation's status
-    $stmt = $conn->prepare("UPDATE donations SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-    // 'si' means bind string (for status) and integer (for donation_id)
-    $stmt->bind_param("si", $new_status, $donation_id);
-
-    if ($stmt->execute()) {
-        // If update is successful, redirect back to the admin panel with a success message.
-        header('Location: admin-panel.php?message=donation_updated');
-    } else {
-        // If update fails, redirect with an error message.
-        error_log("Failed to update donation status: " . $stmt->error); // Log the actual SQL error
-        header('Location: admin-panel.php?message=donation_update_failed');
-    }
-    $stmt->close(); // Close the statement
-    exit(); // Crucial: terminate script execution after a header redirect
-}
-
-// --- Handle POST requests for User Status Change (User Management) ---
-// This block processes actions coming from user management buttons (e.g., Approve Recipient, Deactivate).
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['user_action']) && isset($_POST['user_id'])) {
-    $user_action = $_POST['user_action']; // e.g., 'approve_recipient', 'deactivate', 'activate'
-    $target_user_id = $_POST['user_id'];  // ID of the user to update
-
-    $new_user_status = '';
-    switch ($user_action) {
-        case 'approve_recipient':
-        case 'activate':
-            $new_user_status = 'active';
-            break;
-        case 'deactivate':
-            $new_user_status = 'inactive';
-            break;
-        // No case for 'reject' role, as roles aren't typically "rejected"
-    }
-
-    if (!empty($new_user_status)) {
-        // Prepare an SQL statement to update the user's status
-        $stmt = $conn->prepare("UPDATE users SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-        $stmt->bind_param("si", $new_user_status, $target_user_id); // s for string, i for integer
-
-        if ($stmt->execute()) {
-            // Redirect back to the user management view with a success message.
-            header('Location: admin-panel.php?view=users&message=user_updated');
-        } else {
-            // Log and redirect on failure.
-            error_log("Failed to update user status: " . $stmt->error); // Log the actual SQL error
-            header('Location: admin-panel.php?view=users&message=user_update_failed');
+// --- Handle User Actions (Approve, Reject, Deactivate) ---
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['user_action'])) {
+    $user_id_to_act_on = $_POST['user_id'];
+    $action = $_POST['user_action'];
+    
+    $stmt = null;
+    try {
+        switch ($action) {
+            case 'approve':
+                // Only admin can approve. Moderators can't directly approve, but can review.
+                if ($user_role === 'admin') {
+                    $stmt = $conn->prepare("UPDATE users SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                    $stmt->bind_param("i", $user_id_to_act_on);
+                    if ($stmt->execute()) {
+                        $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User account approved successfully!</div>';
+                        // Set a specific session message for the approved user to see on next login
+                        $_SESSION['user_status_message_' . $user_id_to_act_on] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Welcome! Your account has been <strong>approved</strong> by an administrator. You can now log in and access your dashboard.</div>';
+                    } else {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to approve user: ' . htmlspecialchars($stmt->error) . '</div>';
+                    }
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can approve users.</div>';
+                }
+                break;
+            case 'reject':
+                 // Both admin and moderator can reject.
+                $stmt = $conn->prepare("UPDATE users SET status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                $stmt->bind_param("i", $user_id_to_act_on);
+                if ($stmt->execute()) {
+                    $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">User account rejected.</div>';
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to reject user: ' . htmlspecialchars($stmt->error) . '</div>';
+                }
+                break;
+            case 'deactivate':
+                // Only admin can deactivate
+                if ($user_role === 'admin') {
+                    $stmt = $conn->prepare("UPDATE users SET status = 'inactive', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                    $stmt->bind_param("i", $user_id_to_act_on);
+                    if ($stmt->execute()) {
+                        $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">User account deactivated.</div>';
+                    } else {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to deactivate user: ' . htmlspecialchars($stmt->error) . '</div>';
+                    }
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can deactivate users.</div>';
+                }
+                break;
+            case 'activate':
+                // Only admin can activate an inactive account
+                if ($user_role === 'admin') {
+                    $stmt = $conn->prepare("UPDATE users SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                    $stmt->bind_param("i", $user_id_to_act_on);
+                    if ($stmt->execute()) {
+                        $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User account reactivated.</div>';
+                    } else {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to reactivate user: ' . htmlspecialchars($stmt->error) . '</div>';
+                    }
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can activate users.</div>';
+                }
+                break;
+            default:
+                $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid user action.</div>';
+                break;
         }
-        $stmt->close(); // Close the statement
+    } catch (Exception $e) {
+        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error during user action: ' . htmlspecialchars($e->getMessage()) . '</div>';
+    } finally {
+        if ($stmt) $stmt->close();
+        $conn->close();
     }
-    exit(); // Crucial: terminate script execution after a header redirect
+    header('Location: admin-panel.php?view=' . $current_view);
+    exit();
 }
 
-// --- Fetch Dashboard Statistics ---
-// These queries run regardless of the specific admin panel view to always provide up-to-date stats.
-// Total Donations
-$stmt = $conn->prepare("SELECT COUNT(*) FROM donations");
-$stmt->execute();
-$stmt->bind_result($total_donations); // Bind the result to the variable
-$stmt->fetch(); // Fetch the value
-$stmt->close(); // Close the statement
+// --- Handle Donation Actions (Approve, Reject Donation) ---
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['donation_action'])) {
+    $donation_id_to_act_on = $_POST['donation_id'];
+    $action = $_POST['donation_action'];
 
-// Pending Donations for Approval
-$stmt = $conn->prepare("SELECT COUNT(*) FROM donations WHERE status = 'pending'");
-$stmt->execute();
-$stmt->bind_result($pending_approvals);
-$stmt->fetch();
-$stmt->close();
-
-// Active Users
-$stmt = $conn->prepare("SELECT COUNT(*) FROM users WHERE status = 'active'");
-$stmt->execute();
-$stmt->bind_result($active_users);
-$stmt->fetch();
-$stmt->close();
-
-// Determine which sub-view of the admin panel to display (dashboard, donations, users)
-$view = $_GET['view'] ?? 'dashboard'; // Default to 'dashboard' if no view is specified in the URL
-
-// --- Fetch data for specific views (Donations Table, Users Table) ---
-if ($view === 'donations' || $view === 'dashboard') {
-    // For the dashboard, we only show PENDING donations in the table.
-    // For the 'donations' view, we show ALL donations with their current statuses.
-    $sql_donations = "
-        SELECT d.id, d.description, d.quantity, d.unit, d.expiry_time, d.status, u.organization_name as donor_org
-        FROM donations d
-        JOIN users u ON d.donor_id = u.id
-    ";
-    if ($view === 'dashboard') {
-        $sql_donations .= " WHERE d.status = 'pending'"; // Only show pending for dashboard summary
+    $conn = get_db_connection();
+    $stmt = null;
+    try {
+        switch ($action) {
+            case 'approve_donation':
+                $stmt = $conn->prepare("UPDATE donations SET status = 'approved', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                $stmt->bind_param("i", $donation_id_to_act_on);
+                if ($stmt->execute()) {
+                    $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Donation approved successfully!</div>';
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to approve donation: ' . htmlspecialchars($stmt->error) . '</div>';
+                }
+                break;
+            case 'reject_donation':
+                $stmt = $conn->prepare("UPDATE donations SET status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                $stmt->bind_param("i", $donation_id_to_act_on);
+                if ($stmt->execute()) {
+                    $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Donation rejected.</div>';
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to reject donation: ' . htmlspecialchars($stmt->error) . '</div>';
+                }
+                break;
+            default:
+                $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid donation action.</div>';
+                break;
+        }
+    } catch (Exception $e) {
+        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error during donation action: ' . htmlspecialchars($e->getMessage()) . '</div>';
+    } finally {
+        if ($stmt) $stmt->close();
+        $conn->close();
     }
-    $sql_donations .= " ORDER BY d.created_at DESC";
-
-    $stmt = $conn->prepare($sql_donations);
-    $stmt->execute();
-    $result = $stmt->get_result();
-    while ($row = $result->fetch_assoc()) {
-        $display_pending_donations[] = $row; // This variable now holds data for either pending or all donations based on $view
-    }
-    $stmt->close();
+    header('Location: admin-panel.php?view=donations'); // Redirect to donations view
+    exit();
 }
 
-if ($view === 'users') {
-    // Fetch all users for the user management table
-    $stmt = $conn->prepare("SELECT id, organization_name, email, role, status, created_at FROM users ORDER BY created_at DESC");
-    $stmt->execute();
-    $result = $stmt->get_result();
-    while ($row = $result->fetch_assoc()) {
-        $display_users[] = $row;
-    }
-    $stmt->close();
+// Re-establish connection after POST processing if needed for GET requests
+if (!isset($conn) || !$conn->ping()) {
+    $conn = get_db_connection();
 }
 
-// Close the main database connection after all operations are done.
+// --- Fetch Data Based on Current View ---
+$pending_users = [];
+$active_users = [];
+$inactive_users = [];
+$rejected_users = [];
+$pending_donations = [];
+$approved_donations = [];
+
+if ($current_view === 'dashboard' || $current_view === 'users') {
+    // Fetch users by status - NOW INCLUDING 'status' IN SELECT
+    $stmt_pending_users = $conn->prepare("SELECT id, organization_name, email, role, status, created_at FROM users WHERE status = 'pending' ORDER BY created_at ASC");
+    $stmt_pending_users->execute();
+    $result_pending_users = $stmt_pending_users->get_result();
+    while ($row = $result_pending_users->fetch_assoc()) {
+        $pending_users[] = $row;
+    }
+    $stmt_pending_users->close();
+
+    $stmt_active_users = $conn->prepare("SELECT id, organization_name, email, role, status, created_at FROM users WHERE status = 'active' ORDER BY created_at DESC");
+    $stmt_active_users->execute();
+    $result_active_users = $stmt_active_users->get_result();
+    while ($row = $result_active_users->fetch_assoc()) {
+        $active_users[] = $row;
+    }
+    $stmt_active_users->close();
+
+    $stmt_inactive_users = $conn->prepare("SELECT id, organization_name, email, role, status, created_at FROM users WHERE status = 'inactive' ORDER BY created_at DESC");
+    $stmt_inactive_users->execute();
+    $result_inactive_users = $stmt_inactive_users->get_result();
+    while ($row = $result_inactive_users->fetch_assoc()) {
+        $inactive_users[] = $row;
+    }
+    $stmt_inactive_users->close();
+
+    $stmt_rejected_users = $conn->prepare("SELECT id, organization_name, email, role, status, created_at FROM users WHERE status = 'rejected' ORDER BY created_at DESC");
+    $stmt_rejected_users->execute();
+    $result_rejected_users = $stmt_rejected_users->get_result();
+    while ($row = $result_rejected_users->fetch_assoc()) {
+        $rejected_users[] = $row;
+    }
+    $stmt_rejected_users->close();
+}
+
+if ($current_view === 'dashboard' || $current_view === 'donations') {
+    // Fetch donations by status
+    $stmt_pending_donations = $conn->prepare("SELECT d.id, d.description, d.quantity, d.unit, d.expiry_time, u.organization_name as donor_org, d.created_at FROM donations d JOIN users u ON d.donor_id = u.id WHERE d.status = 'pending' ORDER BY d.created_at ASC");
+    $stmt_pending_donations->execute();
+    $result_pending_donations = $stmt_pending_donations->get_result();
+    while ($row = $result_pending_donations->fetch_assoc()) {
+        $pending_donations[] = $row;
+    }
+    $stmt_pending_donations->close();
+
+    $stmt_approved_donations = $conn->prepare("SELECT d.id, d.description, d.quantity, d.unit, d.expiry_time, u.organization_name as donor_org, d.created_at FROM donations d JOIN users u ON d.donor_id = u.id WHERE d.status = 'approved' ORDER BY d.created_at DESC");
+    $stmt_approved_donations->execute();
+    $result_approved_donations = $stmt_approved_donations->get_result();
+    while ($row = $result_approved_donations->fetch_assoc()) {
+        $approved_donations[] = $row;
+    }
+    $stmt_approved_donations->close();
+}
+
 $conn->close();
 ?>
 <!DOCTYPE html>
@@ -168,12 +219,10 @@ $conn->close();
     <title>SahaniShare - Admin Panel</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-
     <!-- Google Fonts: Inter for body, Montserrat for headings -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
-
     <!-- Font Awesome for Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <!-- Link to external style.css -->
@@ -183,267 +232,358 @@ $conn->close();
             font-family: 'Inter', sans-serif;
             @apply bg-gray-100 text-gray-800;
         }
+        .sidebar {
+            width: 250px;
+            /* other styling */
+        }
+        .main-content {
+            margin-left: 250px;
+            /* other styling */
+        }
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: relative;
+            }
+            .main-content {
+                margin-left: 0;
+            }
+        }
+        /* Status tags for users and donations */
+        .status-tag {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .status-pending { @apply bg-orange-100 text-orange-800; }
+        .status-approved { @apply bg-green-100 text-green-800; }
+        .status-rejected { @apply bg-red-100 text-red-800; }
+        .status-inactive { @apply bg-gray-100 text-gray-800; } /* For users only */
+        .status-fulfilled { @apply bg-green-600 text-white; } /* For donations only */
     </style>
 </head>
-<body class="min-h-screen flex">
+<body class="min-h-screen flex flex-col md:flex-row">
 
     <!-- Sidebar Navigation -->
-    <aside class="w-64 bg-white shadow-md p-6 hidden md:block flex-shrink-0">
-        <div class="text-primary-green text-2xl font-bold mb-8">
-            <i class="fas fa-hand-holding-heart"></i> SahaniShare
+    <aside class="sidebar bg-primary-green text-white flex flex-col p-6 shadow-lg md:min-h-screen">
+        <div class="text-3xl font-bold mb-8 text-center">
+            <i class="fas fa-tools"></i> Admin Panel
         </div>
-        <nav>
-            <ul class="space-y-3">
-                <li><a href="admin-panel.php?view=dashboard" class="flex items-center text-neutral-dark hover:text-primary-green font-medium py-2 px-3 rounded-lg hover:bg-gray-100 transition duration-200"><i class="fas fa-tachometer-alt mr-3"></i> Dashboard</a></li>
-                <li><a href="admin-panel.php?view=donations" class="flex items-center text-neutral-dark hover:text-primary-green font-medium py-2 px-3 rounded-lg hover:bg-gray-100 transition duration-200"><i class="fas fa-box mr-3"></i> Donations</a></li>
-                <li><a href="admin-panel.php?view=users" class="flex items-center text-neutral-dark hover:text-primary-green font-medium py-2 px-3 rounded-lg hover:bg-gray-100 transition duration-200"><i class="fas fa-users mr-3"></i> Users</a></li>
-                <li><a href="reports.php" class="flex items-center text-neutral-dark hover:text-primary-green font-medium py-2 px-3 rounded-lg hover:bg-gray-100 transition duration-200"><i class="fas fa-chart-pie mr-3"></i> Reports</a></li>
-                <li><a href="#" class="flex items-center text-neutral-dark hover:text-primary-green font-medium py-2 px-3 rounded-lg hover:bg-gray-100 transition duration-200"><i class="fas fa-cog mr-3"></i> Settings</a></li>
-                <li class="pt-4"><a href="logout.php" class="flex items-center text-red-500 hover:text-red-700 font-medium py-2 px-3 rounded-lg hover:bg-gray-100 transition duration-200"><i class="fas fa-sign-out-alt mr-3"></i> Logout</a></li>
+        <nav class="flex-grow">
+            <ul class="space-y-4">
+                <li>
+                    <a href="admin-panel.php?view=dashboard" class="flex items-center p-3 rounded-lg hover:bg-green-700 transition-colors <?php echo ($current_view === 'dashboard' ? 'bg-green-700' : ''); ?>">
+                        <i class="fas fa-tachometer-alt mr-3"></i> Dashboard
+                    </a>
+                </li>
+                <li>
+                    <a href="admin-panel.php?view=users" class="flex items-center p-3 rounded-lg hover:bg-green-700 transition-colors <?php echo ($current_view === 'users' ? 'bg-green-700' : ''); ?>">
+                        <i class="fas fa-users mr-3"></i> Manage Users
+                    </a>
+                </li>
+                <li>
+                    <a href="admin-panel.php?view=donations" class="flex items-center p-3 rounded-lg hover:bg-green-700 transition-colors <?php echo ($current_view === 'donations' ? 'bg-green-700' : ''); ?>">
+                        <i class="fas fa-boxes mr-3"></i> Manage Donations
+                    </a>
+                </li>
+                <li>
+                    <a href="#" class="flex items-center p-3 rounded-lg hover:bg-green-700 transition-colors">
+                        <i class="fas fa-chart-bar mr-3"></i> Reports
+                    </a>
+                </li>
+                <li>
+                    <a href="#" class="flex items-center p-3 rounded-lg hover:bg-green-700 transition-colors">
+                        <i class="fas fa-cogs mr-3"></i> Settings
+                    </a>
+                </li>
             </ul>
         </nav>
+        <div class="mt-8 text-center">
+            <p class="text-sm font-light">Logged in as:</p>
+            <p class="font-medium"><?php echo htmlspecialchars($organization_name); ?></p>
+            <p class="text-xs italic">(<?php echo htmlspecialchars(ucfirst($user_role)); ?>)</p>
+            <a href="logout.php" class="mt-4 inline-block bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md transition-colors text-sm">
+                <i class="fas fa-sign-out-alt mr-2"></i> Logout
+            </a>
+        </div>
     </aside>
 
-    <div class="flex-grow flex flex-col">
-        <!-- Top Navigation Bar for Mobile Header (replicated for consistency) -->
-        <header class="bg-white shadow-md py-4 px-6 flex items-center justify-between sticky top-0 z-50 md:hidden">
-            <div class="flex items-center">
-                <div class="text-primary-green text-2xl font-bold mr-2">
-                    <i class="fas fa-hand-holding-heart"></i> SahaniShare
+    <!-- Main Content Area -->
+    <main class="main-content flex-grow p-4 md:p-8">
+        <h1 class="text-4xl font-bold text-neutral-dark mb-8 text-center md:text-left">
+            <?php
+            switch ($current_view) {
+                case 'dashboard': echo 'Admin Dashboard'; break;
+                case 'users': echo 'Manage Users'; break;
+                case 'donations': echo 'Manage Donations'; break;
+                default: echo 'Admin Panel'; break;
+            }
+            ?>
+        </h1>
+
+        <?php echo $message; // Display messages from session ?>
+
+        <?php if ($current_view === 'dashboard'): ?>
+            <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <!-- Quick Stats -->
+                <div class="card p-6 flex flex-col items-center justify-center">
+                    <i class="fas fa-user-plus text-5xl text-primary-green mb-3"></i>
+                    <p class="text-gray-600 text-lg">Pending Users</p>
+                    <p class="text-4xl font-bold text-neutral-dark"><?php echo count($pending_users); ?></p>
+                    <a href="admin-panel.php?view=users" class="text-primary-green hover:underline mt-2">View Details</a>
+                </div>
+                <div class="card p-6 flex flex-col items-center justify-center">
+                    <i class="fas fa-box-open text-5xl text-accent-orange mb-3"></i>
+                    <p class="text-gray-600 text-lg">Pending Donations</p>
+                    <p class="text-4xl font-bold text-neutral-dark"><?php echo count($pending_donations); ?></p>
+                    <a href="admin-panel.php?view=donations" class="text-primary-green hover:underline mt-2">View Details</a>
+                </div>
+                <div class="card p-6 flex flex-col items-center justify-center">
+                    <i class="fas fa-users-cog text-5xl text-neutral-dark mb-3"></i>
+                    <p class="text-gray-600 text-lg">Total Active Users</p>
+                    <p class="text-4xl font-bold text-neutral-dark"><?php echo count($active_users); ?></p>
+                    <a href="admin-panel.php?view=users" class="text-primary-green hover:underline mt-2">View Details</a>
                 </div>
             </div>
-            <button id="mobile-menu-button" class="p-2 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-green">
-                <i class="fas fa-bars text-neutral-dark text-xl"></i>
-            </button>
-        </header>
 
-        <!-- Mobile Menu Overlay -->
-        <div id="mobile-menu-overlay" class="fixed inset-0 bg-gray-800 bg-opacity-75 z-40 hidden md:hidden"></div>
-        <nav id="mobile-menu" class="fixed top-0 right-0 w-64 h-full bg-white shadow-lg z-50 transform translate-x-full transition-transform duration-300 ease-in-out md:hidden">
-            <div class="p-6">
-                <button id="close-mobile-menu" class="absolute top-4 right-4 text-gray-500 hover:text-gray-700">
-                    <i class="fas fa-times text-xl"></i>
-                </button>
-                <div class="text-primary-green text-xl font-bold mb-8">SahaniShare</div>
-                <ul class="space-y-4">
-                    <li><a href="admin-panel.php?view=dashboard" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Dashboard</a></li>
-                    <li><a href="admin-panel.php?view=donations" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Donations</a></li>
-                    <li><a href="admin-panel.php?view=users" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Users</a></li>
-                    <li><a href="reports.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Reports</a></li>
-                    <li><a href="#" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Settings</a></li>
-                    <li><a href="logout.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Logout</a></li>
-                </ul>
-            </div>
-        </nav>
-
-        <!-- Main Content Area -->
-        <main class="flex-grow container mx-auto p-4 md:p-8">
-            <h1 class="text-4xl font-bold text-neutral-dark mb-8 text-center md:text-left">Admin Panel (<?php echo htmlspecialchars(ucfirst($user_role)); ?>)</h1>
-            <div class="card p-6">
-                <p class="text-gray-700 mb-6">Welcome, Administrator! Use this panel to manage donations, user accounts, and generate reports.</p>
-
-                <?php if ($view === 'dashboard'): ?>
-                    <!-- Admin Dashboard Overview -->
-                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
-                        <div class="card p-4 text-center">
-                            <i class="fas fa-box-open text-primary-green text-4xl mb-3"></i>
-                            <h4 class="font-semibold text-xl">Total Donations</h4>
-                            <p class="text-4xl font-bold text-neutral-dark"><?php echo htmlspecialchars($total_donations); ?></p>
-                        </div>
-                        <div class="card p-4 text-center">
-                            <i class="fas fa-hourglass-half text-accent-orange text-4xl mb-3"></i>
-                            <h4 class="font-semibold text-xl">Pending Approvals</h4>
-                            <p class="text-4xl font-bold text-neutral-dark"><?php echo htmlspecialchars($pending_approvals); ?></p>
-                        </div>
-                        <div class="card p-4 text-center">
-                            <i class="fas fa-users text-blue-500 text-4xl mb-3"></i>
-                            <h4 class="font-semibold text-xl">Active Users</h4>
-                            <p class="text-4xl font-bold text-neutral-dark"><?php echo htmlspecialchars($active_users); ?></p>
-                        </div>
-                    </div>
-
-                    <!-- Pending Donations Table -->
-                    <h2 class="text-2xl font-semibold text-neutral-dark mb-4">Pending Donations</h2>
+            <!-- Recent Pending Users -->
+            <div class="card p-6 mt-8">
+                <h3 class="text-xl font-semibold text-neutral-dark mb-4">Recent Pending Users</h3>
+                <?php if (empty($pending_users)): ?>
+                    <p class="text-gray-600 text-center">No pending user registrations.</p>
+                <?php else: ?>
                     <div class="overflow-x-auto">
                         <table class="min-w-full bg-white rounded-lg shadow overflow-hidden">
-                            <thead class="bg-gray-100">
+                            <thead class="bg-gray-200">
                                 <tr>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Food Item</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Donor</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Expiry</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Organization</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Email</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Role</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Registered</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Actions</th>
                                 </tr>
                             </thead>
-                            <tbody class="divide-y divide-gray-200">
-                                <?php if (empty($display_pending_donations)): ?>
-                                    <tr>
-                                        <td colspan="5" class="py-4 px-4 text-center text-gray-600">No pending donations.</td>
-                                    </tr>
-                                <?php else: ?>
-                                    <?php foreach ($display_pending_donations as $donation): ?>
-                                        <tr>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo htmlspecialchars($donation['description']); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo htmlspecialchars($donation['donor_org']); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo htmlspecialchars($donation['quantity'] . ' ' . $donation['unit']); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo date('Y-m-d', strtotime($donation['expiry_time'])); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap">
-                                                <form method="POST" action="admin-panel.php" class="inline-block">
-                                                    <input type="hidden" name="donation_id" value="<?php echo $donation['id']; ?>">
-                                                    <button type="submit" name="action" value="approve" class="text-primary-green hover:text-primary-green-dark mr-2"><i class="fas fa-check"></i> Approve</button>
-                                                </form>
-                                                <form method="POST" action="admin-panel.php" class="inline-block">
-                                                    <input type="hidden" name="donation_id" value="<?php echo $donation['id']; ?>">
-                                                    <button type="submit" name="action" value="reject" class="text-red-500 hover:text-red-700"><i class="fas fa-times"></i> Reject</button>
-                                                </form>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                <?php endif; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                <?php elseif ($view === 'donations'): ?>
-                    <!-- All Donations Table -->
-                    <h2 class="text-2xl font-semibold text-neutral-dark mb-4">All Donations</h2>
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full bg-white rounded-lg shadow overflow-hidden">
-                            <thead class="bg-gray-100">
-                                <tr>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Food Item</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Donor</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Quantity</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Expiry</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-gray-200">
-                                <?php if (empty($display_pending_donations)): // Using same variable for all donations, needs rename if truly separating ?>
-                                    <tr>
-                                        <td colspan="6" class="py-4 px-4 text-center text-gray-600">No donations found.</td>
-                                    </tr>
-                                <?php else: ?>
-                                    <?php foreach ($display_pending_donations as $donation): ?>
-                                        <tr>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo htmlspecialchars($donation['description']); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo htmlspecialchars($donation['donor_org']); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo htmlspecialchars($donation['quantity'] . ' ' . $donation['unit']); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo date('Y-m-d', strtotime($donation['expiry_time'])); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap">
-                                                <?php
-                                                    $status_class = '';
-                                                    switch ($donation['status']) {
-                                                        case 'pending': $status_class = 'status-pending'; break;
-                                                        case 'approved': $status_class = 'status-approved'; break;
-                                                        case 'fulfilled': $status_class = 'status-fulfilled'; break;
-                                                        case 'rejected': $status_class = 'status-rejected'; break;
-                                                    }
-                                                ?>
-                                                <span class="status-tag <?php echo $status_class; ?>"><?php echo htmlspecialchars(ucfirst($donation['status'])); ?></span>
-                                            </td>
-                                            <td class="py-4 px-4 whitespace-nowrap">
-                                                <!-- Actions: View Details, Edit, maybe direct status change -->
-                                                <button class="text-blue-500 hover:text-blue-700 mr-2"><i class="fas fa-eye"></i> View</button>
-                                                <?php if ($donation['status'] === 'pending'): ?>
-                                                    <form method="POST" action="admin-panel.php" class="inline-block">
-                                                        <input type="hidden" name="donation_id" value="<?php echo $donation['id']; ?>">
-                                                        <button type="submit" name="action" value="approve" class="text-primary-green hover:text-primary-green-dark mr-2"><i class="fas fa-check"></i> Approve</button>
-                                                    </form>
-                                                    <form method="POST" action="admin-panel.php" class="inline-block">
-                                                        <input type="hidden" name="donation_id" value="<?php echo $donation['id']; ?>">
-                                                        <button type="submit" name="action" value="reject" class="text-red-500 hover:text-red-700"><i class="fas fa-times"></i> Reject</button>
-                                                    </form>
-                                                <?php endif; ?>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                <?php endif; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                <?php elseif ($view === 'users'): ?>
-                    <!-- User Management Table -->
-                    <h2 class="text-2xl font-semibold text-neutral-dark mb-4">User Accounts</h2>
-                    <div class="overflow-x-auto">
-                        <table class="min-w-full bg-white rounded-lg shadow overflow-hidden">
-                            <thead class="bg-gray-100">
-                                <tr>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Organization</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Email</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Role</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                                    <th class="py-3 px-4 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-gray-200">
-                                <?php if (empty($display_users)): ?>
-                                    <tr>
-                                        <td colspan="5" class="py-4 px-4 text-center text-gray-600">No users found.</td>
-                                    </tr>
-                                <?php else: ?>
-                                    <?php foreach ($display_users as $user): ?>
-                                        <tr>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo htmlspecialchars($user['organization_name']); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo htmlspecialchars($user['email']); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap"><?php echo htmlspecialchars(ucfirst($user['role'])); ?></td>
-                                            <td class="py-4 px-4 whitespace-nowrap">
-                                                <?php
-                                                    $status_class = '';
-                                                    switch ($user['status']) {
-                                                        case 'pending': $status_class = 'status-pending'; break;
-                                                        case 'active': $status_class = 'status-approved'; break; // Using approved for active
-                                                        case 'inactive': $status_class = 'status-rejected'; break; // Using rejected for inactive
-                                                        case 'rejected': $status_class = 'status-rejected'; break;
-                                                    }
-                                                ?>
-                                                <span class="status-tag <?php echo $status_class; ?>"><?php echo htmlspecialchars(ucfirst($user['status'])); ?></span>
-                                            </td>
-                                            <td class="py-4 px-4 whitespace-nowrap">
-                                                <form method="POST" action="admin-panel.php" class="inline-block">
+                            <tbody>
+                                <?php foreach (array_slice($pending_users, 0, 5) as $user): // Show max 5 ?>
+                                    <tr class="border-b last:border-b-0 hover:bg-gray-50">
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($user['organization_name']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($user['email']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars(ucfirst($user['role'])); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo date('Y-m-d', strtotime($user['created_at'])); ?></td>
+                                        <td class="py-3 px-4 text-sm">
+                                            <div class="flex space-x-2">
+                                                <form method="POST" action="admin-panel.php?view=users">
                                                     <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
-                                                    <?php if ($user['status'] === 'pending' && $user['role'] === 'recipient'): ?>
-                                                        <button type="submit" name="user_action" value="approve_recipient" class="text-primary-green hover:text-primary-green-dark mr-2"><i class="fas fa-user-check"></i> Approve Recipient</button>
-                                                    <?php elseif ($user['status'] === 'active'): ?>
-                                                        <button type="submit" name="user_action" value="deactivate" class="text-orange-500 hover:text-orange-700 mr-2"><i class="fas fa-user-times"></i> Deactivate</button>
-                                                    <?php elseif ($user['status'] === 'inactive' || $user['status'] === 'rejected'): ?>
-                                                        <button type="submit" name="user_action" value="activate" class="text-blue-500 hover:text-blue-700 mr-2"><i class="fas fa-user-plus"></i> Activate</button>
-                                                    <?php endif; ?>
-                                                    <!-- More actions like 'Edit Profile' could go here -->
+                                                    <button type="submit" name="user_action" value="approve" class="bg-green-500 text-white px-3 py-1 rounded-md hover:bg-green-600 transition-colors text-xs">Approve</button>
                                                 </form>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                <?php endif; ?>
+                                                <form method="POST" action="admin-panel.php?view=users">
+                                                    <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                                    <button type="submit" name="user_action" value="reject" class="bg-red-500 text-white px-3 py-1 rounded-md hover:bg-red-600 transition-colors text-xs">Reject</button>
+                                                </form>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
                             </tbody>
                         </table>
                     </div>
                 <?php endif; ?>
             </div>
-        </main>
-    </div>
+
+        <?php elseif ($current_view === 'users'): ?>
+            <div class="card p-6">
+                <h3 class="text-xl font-semibold text-neutral-dark mb-4">All Users</h3>
+                <div class="mb-6 flex flex-wrap gap-4">
+                    <a href="admin-panel.php?view=users&filter=all" class="px-4 py-2 rounded-md <?php echo (!isset($_GET['filter']) || $_GET['filter'] === 'all' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">All</a>
+                    <a href="admin-panel.php?view=users&filter=pending" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'pending' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Pending (<?php echo count($pending_users); ?>)</a>
+                    <a href="admin-panel.php?view=users&filter=active" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'active' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Active (<?php echo count($active_users); ?>)</a>
+                    <a href="admin-panel.php?view=users&filter=inactive" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'inactive' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Inactive (<?php echo count($inactive_users); ?>)</a>
+                    <a href="admin-panel.php?view=users&filter=rejected" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'rejected' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Rejected (<?php echo count($rejected_users); ?>)</a>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="min-w-full bg-white rounded-lg shadow overflow-hidden">
+                        <thead class="bg-gray-200">
+                            <tr>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">ID</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Organization</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Email</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Role</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Status</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Registered On</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            $filter = $_GET['filter'] ?? 'all';
+                            $users_to_display = [];
+                            if ($filter === 'all') {
+                                $users_to_display = array_merge($pending_users, $active_users, $inactive_users, $rejected_users);
+                                usort($users_to_display, function($a, $b) {
+                                    return strtotime($b['created_at']) - strtotime($a['created_at']);
+                                });
+                            } elseif ($filter === 'pending') {
+                                $users_to_display = $pending_users;
+                            } elseif ($filter === 'active') {
+                                $users_to_display = $active_users;
+                            } elseif ($filter === 'inactive') {
+                                $users_to_display = $inactive_users;
+                            } elseif ($filter === 'rejected') {
+                                $users_to_display = $rejected_users;
+                            }
+                            ?>
+                            <?php if (empty($users_to_display)): ?>
+                                <tr><td colspan="7" class="py-4 text-center text-gray-600">No users found for this filter.</td></tr>
+                            <?php else: ?>
+                                <?php foreach ($users_to_display as $user): ?>
+                                    <tr class="border-b last:border-b-0 hover:bg-gray-50">
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($user['id']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($user['organization_name']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($user['email']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars(ucfirst($user['role'])); ?></td>
+                                        <td class="py-3 px-4 text-sm">
+                                            <span class="status-tag <?php
+                                                $status_class = '';
+                                                // Accessing $user['status'] is now safe as it's fetched from DB
+                                                switch ($user['status']) {
+                                                    case 'pending': $status_class = 'status-pending'; break;
+                                                    case 'active': $status_class = 'status-approved'; break;
+                                                    case 'inactive': $status_class = 'status-inactive'; break;
+                                                    case 'rejected': $status_class = 'status-rejected'; break;
+                                                }
+                                                echo $status_class;
+                                            ?>"><?php echo htmlspecialchars(ucfirst($user['status'])); ?></span>
+                                        </td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo date('Y-m-d', strtotime($user['created_at'])); ?></td>
+                                        <td class="py-3 px-4 text-sm">
+                                            <div class="flex flex-wrap gap-2">
+                                                <?php if ($user['status'] === 'pending'): ?>
+                                                    <?php if ($user_role === 'admin'): // Only Admin can Approve ?>
+                                                        <form method="POST" action="admin-panel.php?view=users" class="inline-block">
+                                                            <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                                            <button type="submit" name="user_action" value="approve" class="bg-primary-green text-white px-3 py-1 rounded-md hover:bg-primary-green-dark transition-colors text-xs">Approve</button>
+                                                        </form>
+                                                    <?php endif; ?>
+                                                    <form method="POST" action="admin-panel.php?view=users" class="inline-block">
+                                                        <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                                        <button type="submit" name="user_action" value="reject" class="bg-red-500 text-white px-3 py-1 rounded-md hover:bg-red-600 transition-colors text-xs">Reject</button>
+                                                    </form>
+                                                <?php elseif ($user['status'] === 'active'): ?>
+                                                    <?php if ($user_role === 'admin'): // Only Admin can Deactivate ?>
+                                                        <form method="POST" action="admin-panel.php?view=users" class="inline-block">
+                                                            <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                                            <button type="submit" name="user_action" value="deactivate" class="bg-yellow-500 text-white px-3 py-1 rounded-md hover:bg-yellow-600 transition-colors text-xs">Deactivate</button>
+                                                        </form>
+                                                    <?php endif; ?>
+                                                <?php elseif ($user['status'] === 'inactive' || $user['status'] === 'rejected'): ?>
+                                                     <?php if ($user_role === 'admin'): // Only Admin can Activate ?>
+                                                        <form method="POST" action="admin-panel.php?view=users" class="inline-block">
+                                                            <input type="hidden" name="user_id" value="<?php echo $user['id']; ?>">
+                                                            <button type="submit" name="user_action" value="activate" class="bg-blue-500 text-white px-3 py-1 rounded-md hover:bg-blue-600 transition-colors text-xs">Activate</button>
+                                                        </form>
+                                                     <?php endif; ?>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+
+        <?php elseif ($current_view === 'donations'): ?>
+            <div class="card p-6">
+                <h3 class="text-xl font-semibold text-neutral-dark mb-4">All Donations</h3>
+                <div class="mb-6 flex flex-wrap gap-4">
+                    <a href="admin-panel.php?view=donations&filter=all" class="px-4 py-2 rounded-md <?php echo (!isset($_GET['filter']) || $_GET['filter'] === 'all' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">All</a>
+                    <a href="admin-panel.php?view=donations&filter=pending" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'pending' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Pending (<?php echo count($pending_donations); ?>)</a>
+                    <a href="admin-panel.php?view=donations&filter=approved" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'approved' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Approved (<?php echo count($approved_donations); ?>)</a>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="min-w-full bg-white rounded-lg shadow overflow-hidden">
+                        <thead class="bg-gray-200">
+                            <tr>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">ID</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Description</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Quantity</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Donor</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Expiry Time</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Status</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            $filter = $_GET['filter'] ?? 'all';
+                            $donations_to_display = [];
+                            if ($filter === 'all') {
+                                $donations_to_display = array_merge($pending_donations, $approved_donations);
+                                usort($donations_to_display, function($a, $b) {
+                                    return strtotime($b['created_at']) - strtotime($a['created_at']);
+                                });
+                            } elseif ($filter === 'pending') {
+                                $donations_to_display = $pending_donations;
+                            } elseif ($filter === 'approved') {
+                                $donations_to_display = $approved_donations;
+                            }
+                            ?>
+                            <?php if (empty($donations_to_display)): ?>
+                                <tr><td colspan="7" class="py-4 text-center text-gray-600">No donations found for this filter.</td></tr>
+                            <?php else: ?>
+                                <?php foreach ($donations_to_display as $donation): ?>
+                                    <tr class="border-b last:border-b-0 hover:bg-gray-50">
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['id']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['description']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['quantity']) . ' ' . htmlspecialchars($donation['unit']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['donor_org']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo date('Y-m-d H:i', strtotime($donation['expiry_time'])); ?></td>
+                                        <td class="py-3 px-4 text-sm">
+                                            <span class="status-tag <?php
+                                                $status_class = '';
+                                                switch ($donation['status']) {
+                                                    case 'pending': $status_class = 'status-pending'; break;
+                                                    case 'approved': $status_class = 'status-approved'; break;
+                                                    case 'rejected': $status_class = 'status-rejected'; break;
+                                                    case 'fulfilled': $status_class = 'status-fulfilled'; break;
+                                                }
+                                                echo $status_class;
+                                            ?>"><?php echo htmlspecialchars(ucfirst($donation['status'])); ?></span>
+                                        </td>
+                                        <td class="py-3 px-4 text-sm">
+                                            <div class="flex flex-wrap gap-2">
+                                                <?php if ($donation['status'] === 'pending'): ?>
+                                                    <form method="POST" action="admin-panel.php?view=donations" class="inline-block">
+                                                        <input type="hidden" name="donation_id" value="<?php echo $donation['id']; ?>">
+                                                        <button type="submit" name="donation_action" value="approve_donation" class="bg-primary-green text-white px-3 py-1 rounded-md hover:bg-primary-green-dark transition-colors text-xs">Approve</button>
+                                                    </form>
+                                                    <form method="POST" action="admin-panel.php?view=donations" class="inline-block">
+                                                        <input type="hidden" name="donation_id" value="<?php echo $donation['id']; ?>">
+                                                        <button type="submit" name="donation_action" value="reject_donation" class="bg-red-500 text-white px-3 py-1 rounded-md hover:bg-red-600 transition-colors text-xs">Reject</button>
+                                                    </form>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        <?php endif; ?>
+    </main>
 
     <script>
-        const mobileMenuButton = document.getElementById('mobile-menu-button');
-        const mobileMenu = document.getElementById('mobile-menu');
-        const mobileMenuOverlay = document.getElementById('mobile-menu-overlay');
-        const closeMobileMenuButton = document.getElementById('close-mobile-menu');
-
-        // Toggle mobile menu
-        mobileMenuButton.addEventListener('click', () => {
-            mobileMenu.classList.add('mobile-menu-open');
-            mobileMenuOverlay.classList.remove('hidden');
-        });
-
-        closeMobileMenuButton.addEventListener('click', () => {
-            mobileMenu.classList.remove('mobile-menu-open');
-            mobileMenuOverlay.classList.add('hidden');
-        });
-
-        mobileMenuOverlay.addEventListener('click', () => {
-            mobileMenu.classList.remove('mobile-menu-open');
-            mobileMenuOverlay.classList.add('hidden');
-        });
+        // No specific JS for this admin panel in this simplified version
+        // Mobile menu toggle is not included as sidebars are typically always visible on desktop admin panels
+        // For a responsive admin panel, you'd add mobile menu logic here.
     </script>
 </body>
 </html>

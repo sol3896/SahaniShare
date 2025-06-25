@@ -9,19 +9,33 @@ include_once 'db_connection.php';
 // Also check if the recipient's status is 'active' to ensure they can view donations
 if (!isset($_SESSION['user_id']) || $_SESSION['user_role'] !== 'recipient' || $_SESSION['user_status'] !== 'active') {
     // If not logged in, not a recipient, or recipient is not active, redirect to login page
+    // Set a message before redirecting if they somehow land here without active status
+    if (isset($_SESSION['user_id'])) { // If they were logged in but status became inactive
+        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is not active. Please check your status or contact support.</div>';
+    } else { // Not logged in
+        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Please log in to access your dashboard.</div>';
+    }
     header('Location: login-register.php');
     exit();
 }
 
 $user_id = $_SESSION['user_id'];
 $organization_name = $_SESSION['organization_name'];
-$message = ''; // For success/error messages
+$message = ''; // For success or error messages
 
-// Check for messages from previous redirects (e.g., after submitting a request or feedback)
+// Check for general messages from previous redirects (e.g., after submitting a request or feedback)
 if (isset($_SESSION['message'])) {
     $message = $_SESSION['message'];
     unset($_SESSION['message']); // Clear the message after displaying it
 }
+
+// Check for specific user approval message and display it once
+$user_approval_message_key = 'user_status_message_' . $user_id;
+if (isset($_SESSION[$user_approval_message_key])) {
+    $message = $_SESSION[$user_approval_message_key]; // Overwrite or append to general message
+    unset($_SESSION[$user_approval_message_key]); // Display it once then clear it
+}
+
 
 $available_donations = [];
 $my_requests = [];
@@ -79,6 +93,97 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['request_item'])) {
         }
     }
     // Redirect back to the same page to prevent form resubmission and display message
+    header('Location: recipient-dashboard.php');
+    exit();
+}
+
+// --- Handle Recipient Marking as Collected ---
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['mark_received'])) {
+    $request_id = $_POST['request_id'];
+
+    // Fetch current request status to ensure valid transition
+    $stmt_fetch_request_status = $conn->prepare("SELECT status, donation_id, requested_quantity FROM requests WHERE id = ? AND recipient_id = ?");
+    $stmt_fetch_request_status->bind_param("ii", $request_id, $user_id);
+    $stmt_fetch_request_status->execute();
+    $stmt_fetch_request_status->bind_result($current_request_status, $donation_id, $requested_quantity);
+    $stmt_fetch_request_status->fetch();
+    $stmt_fetch_request_status->close();
+
+    if ($current_request_status === null) {
+        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error: Request not found or not yours.</div>';
+    } elseif ($current_request_status === 'collected') {
+        $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">This request is already marked as collected.</div>';
+    } elseif ($current_request_status !== 'approved' && $current_request_status !== 'dispatched') {
+        $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Request is not in an approved or dispatched state to be collected.</div>';
+    } else {
+        $conn->begin_transaction(); // Start transaction
+
+        try {
+            // Update request status to 'collected'
+            $stmt_update_request = $conn->prepare("UPDATE requests SET status = 'collected', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+            $stmt_update_request->bind_param("i", $request_id);
+            if (!$stmt_update_request->execute()) {
+                throw new Exception("Failed to mark request as collected.");
+            }
+            $stmt_update_request->close();
+
+            // Quantity deduction logic: This ensures the quantity is deducted when it reaches 'collected' status.
+            // It's crucial to prevent double deduction if the donor also marked it collected.
+            // The safest approach is to let the donor's action be the primary quantity reducer.
+            // If the recipient marks as collected *and* the donor hasn't reduced quantity yet,
+            // then this logic here will reduce it. This makes it robust regardless of who marks "collected".
+
+            // Get current donation details for this donation
+            $stmt_get_donation_info = $conn->prepare("SELECT quantity FROM donations WHERE id = ? FOR UPDATE"); // FOR UPDATE locks the row
+            $stmt_get_donation_info->bind_param("i", $donation_id);
+            $stmt_get_donation_info->execute();
+            $stmt_get_donation_info->bind_result($current_donation_quantity);
+            $stmt_get_donation_info->fetch();
+            $stmt_get_donation_info->close();
+
+            if ($current_donation_quantity === null) {
+                throw new Exception("Associated donation not found for quantity update.");
+            }
+
+            // Check if the current donation quantity is still sufficient for this request.
+            // If it's not, it implies the quantity was already adjusted (e.g., by donor marking collected, or another request).
+            // We only deduct if the quantity is still higher than the requested amount.
+            // This is a simple heuristic to avoid over-deduction; a dedicated 'quantity_deducted_flag' on the request is more robust.
+            if ($current_donation_quantity >= $requested_quantity) {
+                $new_donation_quantity = $current_donation_quantity - $requested_quantity;
+
+                // Update donation quantity
+                $stmt_update_donation_qty = $conn->prepare("UPDATE donations SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                $stmt_update_donation_qty->bind_param("di", $new_donation_quantity, $donation_id);
+                if (!$stmt_update_donation_qty->execute()) {
+                    throw new Exception("Failed to update donation quantity after recipient collected.");
+                }
+                $stmt_update_donation_qty->close();
+
+                // If donation quantity becomes zero or less, mark it as fulfilled
+                if ($new_donation_quantity <= 0) {
+                    $stmt_fulfill_donation = $conn->prepare("UPDATE donations SET status = 'fulfilled', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                    $stmt_fulfill_donation->bind_param("i", $donation_id);
+                    if (!$stmt_fulfill_donation->execute()) {
+                        throw new Exception("Failed to fulfill donation (final status update) after recipient collected.");
+                    }
+                    $stmt_fulfill_donation->close();
+                }
+                $_SESSION['message'] .= '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Donation quantity reduced.</div>';
+
+            } else {
+                 $_SESSION['message'] .= '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Donation quantity for this item may have already been reduced by donor or another request.</div>';
+            }
+
+
+            $conn->commit(); // Commit the transaction
+            $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Donation marked as received! Thank you.</div>';
+
+        } catch (Exception $e) {
+            $conn->rollback(); // Rollback on error
+            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error confirming receipt: ' . htmlspecialchars($e->getMessage()) . '</div>';
+        }
+    }
     header('Location: recipient-dashboard.php');
     exit();
 }
@@ -141,7 +246,7 @@ $conn->close(); // Close the main database connection
             font-family: 'Inter', sans-serif;
             @apply bg-gray-100 text-gray-800;
         }
-        /* Modal specific styles - Ensure display: none by default */
+        /* Modal specific styles */
         .modal {
             display: none; /* Hidden by default */
             position: fixed; /* Stay in place */
@@ -314,19 +419,31 @@ $conn->close(); // Close the main database connection
                             </div>
                             <div class="flex items-center gap-2">
                                 <?php
-                                    // Determine status tag styling
+                                    // Determine status tag styling for request statuses
                                     $status_class = '';
                                     switch ($request['status']) {
                                         case 'pending': $status_class = 'status-pending'; break;
                                         case 'approved': $status_class = 'status-approved'; break;
-                                        case 'collected': $status_class = 'status-fulfilled'; break; // Using 'fulfilled' for collected for consistent styling
+                                        case 'dispatched': $status_class = 'bg-indigo-500 text-white'; break; // Blue for dispatched
+                                        case 'collected': $status_class = 'status-fulfilled'; break; // Darker green for collected
                                         case 'rejected': $status_class = 'status-rejected'; break;
                                     }
                                 ?>
+                                <!-- Display the actual status from the database -->
                                 <span class="status-tag <?php echo $status_class; ?>"><?php echo htmlspecialchars(ucfirst($request['status'])); ?></span>
 
-                                <?php if ($request['status'] === 'approved' || $request['status'] === 'collected'): ?>
-                                    <!-- "Feedback" button appears if the request is approved or collected -->
+                                <?php if ($request['status'] === 'approved' || $request['status'] === 'dispatched'): ?>
+                                    <!-- "Confirm Received" button appears if the request is 'approved' or 'dispatched' -->
+                                    <form method="POST" action="recipient-dashboard.php" class="inline-block">
+                                        <input type="hidden" name="request_id" value="<?php echo $request['id']; ?>">
+                                        <button type="submit" name="mark_received" class="bg-green-500 text-white text-xs font-semibold px-2 py-1 rounded-full hover:bg-green-600 transition-colors">
+                                            <i class="fas fa-box-open mr-1"></i> Confirm Received
+                                        </button>
+                                    </form>
+                                <?php endif; ?>
+
+                                <?php if ($request['status'] === 'collected'): ?>
+                                    <!-- "Feedback" button appears ONLY if the request is 'collected' -->
                                     <button class="bg-blue-500 text-white text-xs font-semibold px-2 py-1 rounded-full hover:bg-blue-600 transition-colors feedback-btn"
                                             data-donation-id="<?php echo $request['donation_id_for_feedback']; ?>"
                                             data-recipient-id="<?php echo $user_id; ?>">
@@ -425,26 +542,25 @@ $conn->close(); // Close the main database connection
             button.addEventListener('click', () => {
                 const donationId = button.dataset.donationId;
                 const donationDesc = button.dataset.donationDesc;
-                const donationQuantity = parseFloat(button.dataset.donationQuantity); // Parse as float
+                const donationQuantity = parseFloat(button.dataset.donationQuantity);
                 const donationUnit = button.dataset.donationUnit;
 
                 modalDonationIdInput.value = donationId;
                 modalDonationDescSpan.textContent = `${donationDesc}`;
                 modalAvailableQuantitySpan.textContent = `${donationQuantity} ${donationUnit}`;
-                modalRequestedQuantityInput.value = donationQuantity; // Pre-fill with available quantity
-                modalRequestedQuantityInput.max = donationQuantity; // Set max to available quantity
-                modalRequestedQuantityInput.min = 0.01; // Set minimum to a small positive value
-                modalRequestedQuantityInput.step = 0.01; // Allow decimal quantities
+                modalRequestedQuantityInput.value = donationQuantity;
+                modalRequestedQuantityInput.max = donationQuantity;
+                modalRequestedQuantityInput.min = 0.01;
+                modalRequestedQuantityInput.step = 0.01;
 
-                requestModal.style.display = 'flex'; // Show the modal using flex for centering
+                requestModal.style.display = 'flex';
             });
         });
 
         closeRequestModalButton.addEventListener('click', () => {
-            requestModal.style.display = 'none'; // Hide the modal
+            requestModal.style.display = 'none';
         });
 
-        // Click outside the request modal to close it
         window.addEventListener('click', (event) => {
             if (event.target === requestModal) {
                 requestModal.style.display = 'none';
@@ -460,9 +576,8 @@ $conn->close(); // Close the main database connection
         const starRatingContainer = document.querySelector('.rating-stars');
         const stars = starRatingContainer.querySelectorAll('i');
         const ratingValueInput = document.getElementById('rating-value');
-        let currentRating = 0; // To keep track of the selected rating
+        let currentRating = 0;
 
-        // Event listeners for feedback buttons to open the modal
         feedbackButtons.forEach(button => {
             button.addEventListener('click', () => {
                 const donationId = button.dataset.donationId;
@@ -471,25 +586,22 @@ $conn->close(); // Close the main database connection
                 feedbackModalDonationIdInput.value = donationId;
                 feedbackModalRecipientIdInput.value = recipientId;
 
-                // Reset stars and rating value when opening modal
                 currentRating = 0;
-                ratingValueInput.value = ''; // Clear hidden input
+                ratingValueInput.value = '';
                 stars.forEach(star => {
                     star.classList.remove('fas');
                     star.classList.add('far');
-                    star.style.color = '#ccc'; // Reset color
+                    star.style.color = '#ccc';
                 });
 
-                feedbackModal.style.display = 'flex'; // Show the modal
+                feedbackModal.style.display = 'flex';
             });
         });
 
-        // Close feedback modal
         closeFeedbackModalButton.addEventListener('click', () => {
-            feedbackModal.style.display = 'none'; // Hide the modal
+            feedbackModal.style.display = 'none';
         });
 
-        // Click outside the feedback modal to close it
         window.addEventListener('click', (event) => {
             if (event.target === feedbackModal) {
                 feedbackModal.style.display = 'none';
@@ -504,19 +616,18 @@ $conn->close(); // Close the main database connection
                     if (index < hoverRating) {
                         s.classList.remove('far');
                         s.classList.add('fas');
-                        s.style.color = '#FF9800'; // Highlight color
+                        s.style.color = '#FF9800';
                     } else {
                         s.classList.remove('fas');
                         s.classList.add('far');
-                        s.style.color = '#ccc'; // Default color
+                        s.style.color = '#ccc';
                     }
                 });
             });
 
             star.addEventListener('click', () => {
                 currentRating = parseInt(star.dataset.rating);
-                ratingValueInput.value = currentRating; // Set hidden input value
-                // Persist the selected stars visually
+                ratingValueInput.value = currentRating;
                 stars.forEach((s, index) => {
                     if (index < currentRating) {
                         s.classList.remove('far');
@@ -532,7 +643,6 @@ $conn->close(); // Close the main database connection
         });
 
         starRatingContainer.addEventListener('mouseleave', () => {
-            // Revert to selected rating when mouse leaves container
             stars.forEach((star, index) => {
                 if (index < currentRating) {
                     star.classList.remove('far');
@@ -545,7 +655,10 @@ $conn->close(); // Close the main database connection
                 }
             });
         });
-
     </script>
 </body>
 </html>
+
+
+
+
