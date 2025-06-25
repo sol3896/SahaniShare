@@ -138,7 +138,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['donation_action'])) {
         if ($stmt) $stmt->close();
         $conn->close();
     }
-    header('Location: admin-panel.php?view=donations'); // Redirect to donations view
+    header('Location: admin-panel.php?view=' . $current_view); // Redirect to donations view
     exit();
 }
 
@@ -191,8 +191,8 @@ if ($current_view === 'dashboard' || $current_view === 'users') {
 }
 
 if ($current_view === 'dashboard' || $current_view === 'donations') {
-    // Fetch donations by status
-    $stmt_pending_donations = $conn->prepare("SELECT d.id, d.description, d.quantity, d.unit, d.expiry_time, u.organization_name as donor_org, d.created_at FROM donations d JOIN users u ON d.donor_id = u.id WHERE d.status = 'pending' ORDER BY d.created_at ASC");
+    // Fetch donations by status - NOW INCLUDING 'd.status' IN SELECT
+    $stmt_pending_donations = $conn->prepare("SELECT d.id, d.description, d.quantity, d.unit, d.expiry_time, d.status, u.organization_name as donor_org, d.created_at FROM donations d JOIN users u ON d.donor_id = u.id WHERE d.status = 'pending' ORDER BY d.created_at ASC");
     $stmt_pending_donations->execute();
     $result_pending_donations = $stmt_pending_donations->get_result();
     while ($row = $result_pending_donations->fetch_assoc()) {
@@ -200,7 +200,7 @@ if ($current_view === 'dashboard' || $current_view === 'donations') {
     }
     $stmt_pending_donations->close();
 
-    $stmt_approved_donations = $conn->prepare("SELECT d.id, d.description, d.quantity, d.unit, d.expiry_time, u.organization_name as donor_org, d.created_at FROM donations d JOIN users u ON d.donor_id = u.id WHERE d.status = 'approved' ORDER BY d.created_at DESC");
+    $stmt_approved_donations = $conn->prepare("SELECT d.id, d.description, d.quantity, d.unit, d.expiry_time, d.status, u.organization_name as donor_org, d.created_at FROM donations d JOIN users u ON d.donor_id = u.id WHERE d.status = 'approved' ORDER BY d.created_at DESC");
     $stmt_approved_donations->execute();
     $result_approved_donations = $stmt_approved_donations->get_result();
     while ($row = $result_approved_donations->fetch_assoc()) {
@@ -547,6 +547,7 @@ $conn->close();
                                         <td class="py-3 px-4 text-sm">
                                             <span class="status-tag <?php
                                                 $status_class = '';
+                                                // Accessing $donation['status'] is now safe as it's fetched from DB
                                                 switch ($donation['status']) {
                                                     case 'pending': $status_class = 'status-pending'; break;
                                                     case 'approved': $status_class = 'status-approved'; break;
@@ -587,4 +588,5 @@ $conn->close();
     </script>
 </body>
 </html>
+
 

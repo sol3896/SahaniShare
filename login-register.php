@@ -197,7 +197,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
         }
     </style>
 </head>
-<body class="min-h-screen flex flex-col items-center justify-center p-4 md:p-8">
+<body class="login-page min-h-screen flex flex-col items-center justify-center p-4 md:p-8">
 
     <!-- Login/Register Page Content -->
     <section class="w-full max-w-md">
