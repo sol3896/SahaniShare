@@ -11,7 +11,25 @@ if (!isset($_SESSION['user_id']) || $_SESSION['user_role'] !== 'recipient' || $_
     // If not logged in, not a recipient, or recipient is not active, redirect to login page
     // Set a message before redirecting if they somehow land here without active status
     if (isset($_SESSION['user_id'])) { // If they were logged in but status became inactive
-        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is not active. Please check your status or contact support.</div>';
+        // Fetch the rejection reason if user is rejected
+        if ($_SESSION['user_status'] === 'rejected' && isset($_SESSION['user_id'])) {
+            $conn_temp = get_db_connection();
+            $stmt_reason = $conn_temp->prepare("SELECT rejection_reason FROM users WHERE id = ?");
+            $stmt_reason->bind_param("i", $_SESSION['user_id']);
+            $stmt_reason->execute();
+            $stmt_reason->bind_result($rejection_reason_for_user);
+            $stmt_reason->fetch();
+            $stmt_reason->close();
+            $conn_temp->close();
+
+            if (!empty($rejection_reason_for_user)) {
+                $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Your account has been <strong>rejected</strong>. Reason: ' . htmlspecialchars($rejection_reason_for_user) . '</div>';
+            } else {
+                $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is not active. Please check your status or contact support.</div>';
+            }
+        } else { // Inactive or pending, but not explicitly rejected with a reason
+            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is not active. Please check your status or contact support.</div>';
+        }
     } else { // Not logged in
         $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Please log in to access your dashboard.</div>';
     }
@@ -29,7 +47,7 @@ if (isset($_SESSION['message'])) {
     unset($_SESSION['message']); // Clear the message after displaying it
 }
 
-// Check for specific user approval message and display it once
+// Check for specific user approval message and display it once (should already contain reason if rejected)
 $user_approval_message_key = 'user_status_message_' . $user_id;
 if (isset($_SESSION[$user_approval_message_key])) {
     $message = $_SESSION[$user_approval_message_key]; // Overwrite or append to general message
@@ -208,8 +226,9 @@ $stmt->close();
 // --- Fetch My Requests ---
 // Retrieves all requests made by the current recipient.
 // Includes 'donation_id_for_feedback' to pass to the feedback modal.
+// ADDED: r.rejection_reason to the SELECT statement
 $stmt = $conn->prepare("
-    SELECT r.id, d.description, r.requested_quantity, d.unit, r.status, r.requested_at, d.id as donation_id_for_feedback
+    SELECT r.id, d.description, r.requested_quantity, d.unit, r.status, r.requested_at, d.id as donation_id_for_feedback, r.rejection_reason
     FROM requests r
     JOIN donations d ON r.donation_id = d.id
     WHERE r.recipient_id = ?
@@ -301,6 +320,83 @@ $conn->close(); // Close the main database connection
         .rating-stars .fas.fa-star { /* Filled star */
             color: #FF9800; /* Accent Orange for filled stars */
         }
+
+        /* Notification styles */
+        .notification-icon {
+            position: relative;
+            cursor: pointer;
+            margin-right: 1.5rem; /* Space from other nav items */
+        }
+        .notification-icon .badge {
+            position: absolute;
+            top: -5px;
+            right: -8px;
+            background-color: #ef4444; /* red-500 */
+            color: white;
+            border-radius: 9999px;
+            padding: 0.25rem 0.5rem;
+            font-size: 0.75rem;
+            font-weight: bold;
+            line-height: 1;
+            min-width: 1.25rem;
+            text-align: center;
+        }
+        .notifications-dropdown {
+            position: absolute;
+            top: 100%; /* Position below the icon */
+            right: 0;
+            background-color: white;
+            border-radius: 0.5rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            width: 320px; /* Fixed width */
+            max-height: 400px;
+            overflow-y: auto;
+            display: none; /* Hidden by default */
+            z-index: 900; /* Below modals, above other content */
+            padding: 0.75rem;
+            margin-top: 0.5rem;
+            animation: slideInFromTop 0.3s ease-out;
+        }
+        @keyframes slideInFromTop {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .notifications-dropdown.show {
+            display: block;
+        }
+        .notification-item {
+            padding: 0.75rem 0.5rem;
+            border-bottom: 1px solid #e5e7eb; /* gray-200 */
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+        .notification-item:last-child {
+            border-bottom: none;
+        }
+        .notification-item:hover {
+            background-color: #f3f4f6; /* gray-100 */
+        }
+        .notification-item.unread {
+            background-color: #e0f2f7; /* light blue for unread */
+            font-weight: 600;
+        }
+        .notification-item.unread:hover {
+             background-color: #b3e5fc; /* slightly darker blue on hover */
+        }
+        .notification-item p {
+            font-size: 0.9rem;
+            color: #374151; /* text-gray-800 */
+        }
+        .notification-item .timestamp {
+            font-size: 0.75rem;
+            color: #6b7280; /* text-gray-500 */
+            margin-top: 0.25rem;
+        }
+        .no-notifications {
+            padding: 1rem;
+            text-align: center;
+            color: #6b7280;
+        }
     </style>
 </head>
 <body class="min-h-screen flex flex-col">
@@ -314,10 +410,25 @@ $conn->close(); // Close the main database connection
             </div>
         </div>
         <!-- Desktop Navigation -->
-        <nav class="hidden md:flex space-x-6">
+        <nav class="hidden md:flex space-x-6 items-center">
             <a href="recipient-dashboard.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Dashboard</a>
             <a href="recipient-dashboard.php#my-requests" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">My Requests</a>
             <a href="#" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Profile</a>
+            
+            <!-- Notification Icon -->
+            <div class="notification-icon" id="notification-icon">
+                <i class="fas fa-bell text-neutral-dark text-xl"></i>
+                <span class="badge hidden" id="notification-badge">0</span>
+                <!-- Notifications Dropdown -->
+                <div class="notifications-dropdown" id="notifications-dropdown">
+                    <h4 class="text-lg font-semibold border-b pb-2 mb-2 text-neutral-dark">Notifications</h4>
+                    <div id="notification-list">
+                        <!-- Notifications will be loaded here by JavaScript -->
+                        <p class="no-notifications">No new notifications.</p>
+                    </div>
+                </div>
+            </div>
+
             <a href="logout.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Logout</a>
         </nav>
         <!-- Mobile Hamburger Icon -->
@@ -416,6 +527,9 @@ $conn->close(); // Close the main database connection
                             <div>
                                 <p class="font-semibold text-lg"><?php echo htmlspecialchars($request['requested_quantity']) . ' ' . htmlspecialchars($request['unit']) . ' ' . htmlspecialchars($request['description']); ?></p>
                                 <p class="text-sm text-gray-600">Requested: <?php echo date('Y-m-d H:i', strtotime($request['requested_at'])); ?></p>
+                                <?php if ($request['status'] === 'rejected' && !empty($request['rejection_reason'])): ?>
+                                    <p class="text-sm text-red-500 font-medium mt-1">Reason for Rejection: <?php echo htmlspecialchars($request['rejection_reason']); ?></p>
+                                <?php endif; ?>
                             </div>
                             <div class="flex items-center gap-2">
                                 <?php
@@ -655,9 +769,150 @@ $conn->close(); // Close the main database connection
                 }
             });
         });
+
+
+        // --- Notification System JavaScript ---
+        const notificationIcon = document.getElementById('notification-icon');
+        const notificationBadge = document.getElementById('notification-badge');
+        const notificationsDropdown = document.getElementById('notifications-dropdown');
+        const notificationList = document.getElementById('notification-list');
+
+        let isDropdownOpen = false;
+
+        // Function to fetch and display notifications
+        async function fetchNotifications() {
+            try {
+                // Fetch notifications from the backend
+                const response = await fetch('fetch_notifications.php'); // No longer need ?read=false or ?count_only=true
+                const data = await response.json(); // Expect full JSON object
+
+                if (data.success) {
+                    updateNotificationUI(data.notifications, data.unread_count);
+                } else {
+                    console.error('Error fetching notifications:', data.error);
+                    notificationList.innerHTML = '<p class="no-notifications text-red-500">Error loading notifications.</p>';
+                }
+
+            } catch (error) {
+                console.error('Network or parsing error fetching notifications:', error);
+                notificationList.innerHTML = '<p class="no-notifications text-red-500">Could not connect to notification service.</p>';
+            }
+        }
+
+        // Function to update the UI with notifications
+        function updateNotificationUI(notifications, unreadCount) {
+            notificationList.innerHTML = ''; // Clear previous notifications
+
+            if (notifications.length > 0) {
+                notifications.forEach(notification => {
+                    const item = document.createElement('div');
+                    item.classList.add('notification-item');
+                    // Notification.is_read comes as a boolean (true/false) or 0/1 depending on DB driver.
+                    // We'll treat 0 as false and anything else as true for robustness.
+                    if (notification.is_read == false || notification.is_read === 0) {
+                        item.classList.add('unread');
+                    }
+                    item.dataset.notificationId = notification.id;
+                    item.dataset.notificationLink = notification.link;
+
+                    // Format timestamp
+                    const date = new Date(notification.created_at);
+                    const timestamp = date.toLocaleString(); // e.g., "7/1/2025, 10:30:00 AM"
+
+                    item.innerHTML = `
+                        <p>${notification.message}</p>
+                        <span class="timestamp">${timestamp}</span>
+                    `;
+                    notificationList.appendChild(item);
+                });
+
+                // Add event listeners to each new notification item
+                document.querySelectorAll('.notification-item').forEach(item => {
+                    item.addEventListener('click', (event) => {
+                        const notificationId = item.dataset.notificationId;
+                        const notificationLink = item.dataset.notificationLink;
+                        
+                        // Mark as read immediately on click
+                        markNotificationAsRead(notificationId);
+                        
+                        // Navigate if there's a link
+                        if (notificationLink && notificationLink !== '#') {
+                            window.location.href = notificationLink;
+                        } else {
+                            // If no specific link, just close dropdown
+                            toggleNotificationsDropdown();
+                        }
+                    });
+                });
+
+            } else {
+                notificationList.innerHTML = '<p class="no-notifications">No new notifications.</p>';
+            }
+
+            // Update badge count
+            if (unreadCount > 0) {
+                notificationBadge.textContent = unreadCount;
+                notificationBadge.classList.remove('hidden');
+            } else {
+                notificationBadge.classList.add('hidden');
+            }
+        }
+
+        // Function to mark a notification as read
+        async function markNotificationAsRead(notificationId) {
+            try {
+                await fetch('mark_notification_read.php', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                    },
+                    body: `notification_id=${notificationId}`
+                });
+                // After marking as read, re-fetch notifications to update UI
+                fetchNotifications(); // This will refresh the list and update the badge
+            } catch (error) {
+                console.error('Error marking notification as read:', error);
+            }
+        }
+
+        // Toggle notification dropdown visibility
+        function toggleNotificationsDropdown() {
+            isDropdownOpen = !isDropdownOpen;
+            if (isDropdownOpen) {
+                notificationsDropdown.classList.add('show');
+                // When dropdown is opened, only fetch notifications.
+                // Marking as read happens on *click* of an individual notification.
+                fetchNotifications(); // Ensure the latest list is shown when opened
+            } else {
+                notificationsDropdown.classList.remove('show');
+            }
+        }
+
+        notificationIcon.addEventListener('click', (event) => {
+            event.stopPropagation(); // Prevent click from bubbling to window and closing
+            toggleNotificationsDropdown();
+        });
+
+        // Close dropdown if clicked outside
+        window.addEventListener('click', (event) => {
+            // Check if the click was outside the dropdown and outside the notification icon
+            if (isDropdownOpen && !notificationsDropdown.contains(event.target) && !notificationIcon.contains(event.target)) {
+                toggleNotificationsDropdown();
+            }
+        });
+
+        // Initial fetch when page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchNotifications();
+            // Poll for new notifications every 15 seconds
+            setInterval(fetchNotifications, 15000); // 15000 milliseconds = 15 seconds
+        });
+
     </script>
 </body>
 </html>
+
+
 
 
 

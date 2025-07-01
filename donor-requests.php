@@ -11,179 +11,201 @@ if (!isset($_SESSION['user_id']) || $_SESSION['user_role'] !== 'donor') {
     exit();
 }
 
-$user_id = $_SESSION['user_id'];
+$user_id = $_SESSION['user_id']; // Current logged-in donor's ID
 $organization_name = $_SESSION['organization_name'];
-$message = ''; // To store success or error messages
+$message = ''; // For success or error messages
 
-// Check for messages from previous redirects
 if (isset($_SESSION['message'])) {
     $message = $_SESSION['message'];
     unset($_SESSION['message']); // Clear the message after displaying it
 }
 
-$donations_with_requests = []; // To store donations and their associated requests
+$requests_for_my_donations = []; // Requests made for this donor's donations
+$my_fulfilled_donations = []; // Donations that have been completely fulfilled
 
-// Establish a database connection
 $conn = get_db_connection();
 
-// --- Handle Request Approval/Rejection/Dispatch/Collection ---
-if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['request_action'])) {
+// --- Handle Request Status Update from Donor ---
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['action'])) {
     $request_id = $_POST['request_id'];
-    $action = $_POST['request_action']; // 'approve_request', 'reject_request', 'mark_dispatched', 'mark_collected'
+    $action = $_POST['action'];
+    $donation_id = $_POST['donation_id']; // Passed from the form for quantity deduction logic
 
-    // Fetch request details to get donation_id, requested_quantity, and current status
-    $stmt_fetch_request = $conn->prepare("SELECT donation_id, requested_quantity, status FROM requests WHERE id = ?");
-    $stmt_fetch_request->bind_param("i", $request_id);
-    $stmt_fetch_request->execute();
-    $stmt_fetch_request->bind_result($donation_id, $requested_quantity, $current_request_status);
-    $stmt_fetch_request->fetch();
-    $stmt_fetch_request->close();
-
-    if ($current_request_status === null) {
-        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error: Request not found or invalid.</div>';
-        header('Location: donor-requests.php');
-        exit();
-    }
-    
     $conn->begin_transaction(); // Start a transaction for atomicity
 
     try {
-        $new_request_status = ''; // Will hold the new status for the request
-        $perform_quantity_deduction = false; // Flag to control quantity deduction
+        // First, verify this request belongs to one of the donor's donations and is in a valid state
+        $stmt_verify = $conn->prepare("
+            SELECT r.status, r.requested_quantity, r.recipient_id, d.donor_id, d.quantity AS donation_available_quantity
+            FROM requests r
+            JOIN donations d ON r.donation_id = d.id
+            WHERE r.id = ? AND d.donor_id = ? FOR UPDATE -- Lock row for update
+        ");
+        $stmt_verify->bind_param("ii", $request_id, $user_id);
+        $stmt_verify->execute();
+        $stmt_verify->bind_result($current_request_status, $requested_quantity, $recipient_id, $donor_id_check, $donation_available_quantity);
+        $stmt_verify->fetch();
+        $stmt_verify->close();
+
+        if ($donor_id_check !== $user_id) {
+            throw new Exception("Unauthorized: Request does not belong to your donations.");
+        }
+
+        $notification_message = '';
+        $notification_type = 'request_status_change';
+        $notification_link = 'recipient-dashboard.php#my-requests'; // Link for recipient
 
         switch ($action) {
-            case 'approve_request':
+            case 'approve':
                 if ($current_request_status !== 'pending') {
-                    throw new Exception("Request is not pending and cannot be approved.");
+                    throw new Exception("Request cannot be approved from its current status: " . htmlspecialchars($current_request_status));
                 }
-                $new_request_status = 'approved';
-                $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Request approved!</div>';
+                $stmt_update = $conn->prepare("UPDATE requests SET status = 'approved', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                $stmt_update->bind_param("i", $request_id);
+                if (!$stmt_update->execute()) {
+                    throw new Exception("Failed to approve request: " . htmlspecialchars($stmt_update->error));
+                }
+                $notification_message = "Your request for " . htmlspecialchars($requested_quantity) . " units has been <strong>approved</strong>!";
+                $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Request approved successfully!</div>';
                 break;
 
-            case 'reject_request':
-                if ($current_request_status !== 'pending') {
-                    throw new Exception("Request is not pending and cannot be rejected.");
-                }
-                $new_request_status = 'rejected';
-                $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Request rejected.</div>';
-                break;
-
-            case 'mark_dispatched':
+            case 'dispatch':
                 if ($current_request_status !== 'approved') {
-                    throw new Exception("Request is not approved and cannot be dispatched.");
+                    throw new Exception("Request cannot be dispatched from its current status: " . htmlspecialchars($current_request_status));
                 }
-                $new_request_status = 'dispatched';
-                $_SESSION['message'] = '<div class="bg-blue-100 border border-blue-400 text-blue-700 px-4 py-3 rounded-md mb-4" role="alert">Request marked as dispatched.</div>';
+                $stmt_update = $conn->prepare("UPDATE requests SET status = 'dispatched', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                $stmt_update->bind_param("i", $request_id);
+                if (!$stmt_update->execute()) {
+                    throw new Exception("Failed to dispatch request: " . htmlspecialchars($stmt_update->error));
+                }
+                $notification_message = "Your request for " . htmlspecialchars($requested_quantity) . " units has been <strong>dispatched</strong> for pickup!";
+                $_SESSION['message'] = '<div class="bg-blue-100 border border-blue-400 text-blue-700 px-4 py-3 rounded-md mb-4" role="alert">Request marked as dispatched!</div>';
                 break;
 
             case 'mark_collected':
-                // Donor marks collected. This implies the item has been physically collected.
-                // It can be marked collected from 'approved' (direct pickup) or 'dispatched' (after delivery).
+                // Donor marks as collected. This should also deduct quantity.
                 if ($current_request_status !== 'approved' && $current_request_status !== 'dispatched') {
-                    throw new Exception("Request status (" . htmlspecialchars($current_request_status) . ") cannot be marked collected by donor.");
+                    throw new Exception("Request cannot be marked collected from its current status: " . htmlspecialchars($current_request_status));
                 }
-                $new_request_status = 'collected';
-                $perform_quantity_deduction = true; // Deduct quantity when donor marks collected
-                $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Request marked as collected.</div>';
+
+                // Check if donation quantity is sufficient before deduction
+                if ($donation_available_quantity < $requested_quantity) {
+                    throw new Exception("Not enough quantity left in donation (" . htmlspecialchars($donation_available_quantity) . ") to mark this request as collected for " . htmlspecialchars($requested_quantity) . ".");
+                }
+
+                $new_donation_quantity = $donation_available_quantity - $requested_quantity;
+
+                // Update request status to 'collected'
+                $stmt_update_request = $conn->prepare("UPDATE requests SET status = 'collected', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                $stmt_update_request->bind_param("i", $request_id);
+                if (!$stmt_update_request->execute()) {
+                    throw new Exception("Failed to mark request as collected (request status update).");
+                }
+                $stmt_update_request->close(); // Close this statement before starting another
+
+                // Update donation quantity
+                $stmt_update_donation_qty = $conn->prepare("UPDATE donations SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                $stmt_update_donation_qty->bind_param("di", $new_donation_quantity, $donation_id);
+                if (!$stmt_update_donation_qty->execute()) {
+                    throw new Exception("Failed to update donation quantity after collection.");
+                }
+                $stmt_update_donation_qty->close(); // Close this statement before starting another
+
+                // If donation quantity becomes zero or less, mark it as fulfilled
+                if ($new_donation_quantity <= 0) {
+                    $stmt_fulfill_donation = $conn->prepare("UPDATE donations SET status = 'fulfilled', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                    $stmt_fulfill_donation->bind_param("i", $donation_id);
+                    if (!$stmt_fulfill_donation->execute()) {
+                        throw new Exception("Failed to fulfill donation (final status update).");
+                    }
+                    $stmt_fulfill_donation->close();
+                }
+
+                $notification_message = "Your request for " . htmlspecialchars($requested_quantity) . " units has been <strong>collected</strong>!";
+                $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Request marked as collected! Donation quantity updated.</div>';
+                break;
+
+            case 'reject':
+                if ($current_request_status === 'collected' || $current_request_status === 'rejected') {
+                    throw new Exception("Request cannot be rejected from its current status: " . htmlspecialchars($current_request_status));
+                }
+                $stmt_update = $conn->prepare("UPDATE requests SET status = 'rejected', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                $stmt_update->bind_param("i", $request_id);
+                if (!$stmt_update->execute()) {
+                    throw new Exception("Failed to reject request: " . htmlspecialchars($stmt_update->error));
+                }
+                $notification_message = "Your request for " . htmlspecialchars($requested_quantity) . " units has been <strong>rejected</strong>. Please check other available donations.";
+                $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Request rejected.</div>';
                 break;
 
             default:
-                throw new Exception("Invalid request action provided.");
+                throw new Exception("Invalid action.");
         }
 
-        // Apply the new status to the request
-        $stmt_update_request_status = $conn->prepare("UPDATE requests SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-        $stmt_update_request_status->bind_param("si", $new_request_status, $request_id);
-        if (!$stmt_update_request_status->execute()) {
-            throw new Exception("Failed to update request status to " . $new_request_status);
-        }
-        $stmt_update_request_status->close();
-
-        // Perform quantity deduction ONLY if the action indicates collection and it hasn't been done
-        // The quantity deduction should ideally only happen ONCE for a request when its status FIRST becomes 'collected'
-        if ($perform_quantity_deduction) {
-            // Re-fetch current donation quantity to avoid race conditions
-            $stmt_fetch_donation_qty = $conn->prepare("SELECT quantity FROM donations WHERE id = ? AND donor_id = ? FOR UPDATE"); // FOR UPDATE locks the row
-            $stmt_fetch_donation_qty->bind_param("ii", $donation_id, $user_id);
-            $stmt_fetch_donation_qty->execute();
-            $stmt_fetch_donation_qty->bind_result($current_donation_quantity);
-            $stmt_fetch_donation_qty->fetch();
-            $stmt_fetch_donation_qty->close();
-
-            if ($current_donation_quantity === null) {
-                throw new Exception("Donation not found or not owned by this donor. Quantity deduction aborted.");
+        // --- Insert Notification for Recipient ---
+        if (!empty($notification_message)) {
+            $stmt_notify = $conn->prepare("INSERT INTO notifications (user_id, type, message, link) VALUES (?, ?, ?, ?)");
+            $stmt_notify->bind_param("isss", $recipient_id, $notification_type, $notification_message, $notification_link);
+            if (!$stmt_notify->execute()) {
+                error_log("Failed to insert notification for recipient_id " . $recipient_id . ": " . $stmt_notify->error);
+                // Don't throw a fatal error for notification failure, but log it.
             }
-
-            // Ensure we don't deduct more than available (should be handled by request logic, but a safeguard)
-            if ($requested_quantity > $current_donation_quantity) {
-                throw new Exception("Requested quantity (" . $requested_quantity . ") exceeds available donation quantity (" . $current_donation_quantity . "). Quantity deduction aborted.");
-            }
-
-            $new_donation_quantity = $current_donation_quantity - $requested_quantity;
-
-            // Update donation quantity
-            $stmt_update_donation_qty = $conn->prepare("UPDATE donations SET quantity = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-            $stmt_update_donation_qty->bind_param("di", $new_donation_quantity, $donation_id);
-            if (!$stmt_update_donation_qty->execute()) {
-                throw new Exception("Failed to update donation quantity.");
-            }
-            $stmt_update_donation_qty->close();
-
-            // If donation quantity becomes zero or less, mark it as fulfilled
-            if ($new_donation_quantity <= 0) {
-                $stmt_fulfill_donation = $conn->prepare("UPDATE donations SET status = 'fulfilled', updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-                $stmt_fulfill_donation->bind_param("i", $donation_id);
-                if (!$stmt_fulfill_donation->execute()) {
-                    throw new Exception("Failed to fulfill donation (final status update).");
-                }
-                $stmt_fulfill_donation->close();
-            }
-            $_SESSION['message'] .= '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Donation quantity reduced.</div>';
-
+            $stmt_notify->close();
         }
 
-        $conn->commit(); // Commit the transaction if all successful
-
+        $conn->commit(); // Commit the transaction if all operations succeed
     } catch (Exception $e) {
-        $conn->rollback(); // Rollback on error
-        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Transaction failed: ' . htmlspecialchars($e->getMessage()) . '</div>';
+        $conn->rollback(); // Rollback on any error
+        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error: ' . htmlspecialchars($e->getMessage()) . '</div>';
+    } finally {
+        if (isset($stmt_update) && $stmt_update !== null) $stmt_update->close();
+        $conn->close();
     }
-
+    // Always redirect to prevent form resubmission, ensuring a fresh GET request
     header('Location: donor-requests.php');
     exit();
 }
 
-
-// --- Fetch Donations and their Requests ---
-// Select all donations belonging to the current donor
-$stmt_donations = $conn->prepare("SELECT id, description, quantity, unit, expiry_time, status FROM donations WHERE donor_id = ? ORDER BY created_at DESC");
-$stmt_donations->bind_param("i", $user_id);
-$stmt_donations->execute();
-$result_donations = $stmt_donations->get_result();
-
-while ($donation = $result_donations->fetch_assoc()) {
-    $donation_id = $donation['id'];
-    $donation['requests'] = []; // Initialize an empty array for requests
-
-    // Fetch all requests for this specific donation, sorted by status priority
-    $stmt_requests = $conn->prepare("
-        SELECT r.id as request_id, r.requested_quantity, r.status, r.requested_at, u.organization_name as recipient_org_name, u.email as recipient_email
-        FROM requests r
-        JOIN users u ON r.recipient_id = u.id
-        WHERE r.donation_id = ?
-        ORDER BY FIELD(r.status, 'pending', 'approved', 'dispatched', 'collected', 'rejected'), r.requested_at ASC
-    ");
-    $stmt_requests->bind_param("i", $donation_id);
-    $stmt_requests->execute();
-    $result_requests = $stmt_requests->get_result();
-    while ($request = $result_requests->fetch_assoc()) {
-        $donation['requests'][] = $request; // Add request to the donation's requests array
-    }
-    $stmt_requests->close();
-
-    $donations_with_requests[] = $donation; // Add the donation (with its requests) to the main array
+// Re-establish connection after POST processing if needed for GET requests
+if (!isset($conn) || !$conn->ping()) {
+    $conn = get_db_connection();
 }
-$stmt_donations->close();
+
+// --- Fetch all requests for donor's donations ---
+$stmt = $conn->prepare("
+    SELECT r.id AS request_id, r.requested_quantity, r.status AS request_status, r.requested_at,
+           d.id AS donation_id, d.description AS donation_description, d.quantity AS donation_quantity, d.unit AS donation_unit,
+           u.organization_name AS recipient_org, u.email AS recipient_email
+    FROM requests r
+    JOIN donations d ON r.donation_id = d.id
+    JOIN users u ON r.recipient_id = u.id
+    WHERE d.donor_id = ?
+    ORDER BY r.requested_at DESC
+");
+$stmt->bind_param("i", $user_id);
+$stmt->execute();
+$result = $stmt->get_result();
+while ($row = $result->fetch_assoc()) {
+    $requests_for_my_donations[] = $row;
+}
+$stmt->close();
+
+// --- Fetch donor's donations that are fulfilled (quantity 0) ---
+// FIXED: Added 'status' to the SELECT statement
+$stmt = $conn->prepare("
+    SELECT id, description, quantity, unit, expiry_time, created_at, status
+    FROM donations
+    WHERE donor_id = ? AND status = 'fulfilled'
+    ORDER BY created_at DESC
+");
+$stmt->bind_param("i", $user_id);
+$stmt->execute();
+$result = $stmt->get_result();
+while ($row = $result->fetch_assoc()) {
+    $my_fulfilled_donations[] = $row;
+}
+$stmt->close();
+
 $conn->close();
 ?>
 <!DOCTYPE html>
@@ -191,7 +213,7 @@ $conn->close();
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SahaniShare - Manage Requests</title>
+    <title>SahaniShare - Donor Requests</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Google Fonts: Inter for body, Montserrat for headings -->
@@ -207,31 +229,44 @@ $conn->close();
             font-family: 'Inter', sans-serif;
             @apply bg-gray-100 text-gray-800;
         }
-        .request-item {
-            @apply bg-gray-50 p-4 rounded-lg shadow-sm mb-3;
+        /* Status tags */
+        .status-tag {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            white-space: nowrap;
         }
-        .request-item:last-child {
-            margin-bottom: 0;
-        }
+        .status-pending { @apply bg-orange-100 text-orange-800; }
+        .status-approved { @apply bg-green-100 text-green-800; }
+        /* FIXED: Added !important to ensure these styles are applied */
+        .status-dispatched { background-color: #4f46e5 !important; color: white !important; } /* indigo-500 */
+        .status-collected { background-color: #9333ea !important; color: white !important; } /* purple-600 */
+        .status-rejected { @apply bg-red-100 text-red-800; }
+        .status-fulfilled { @apply bg-gray-600 text-white; }
+        /* Fallback for unknown status, ensure it's visible */
+        .bg-gray-200.text-gray-700 { @apply bg-gray-200 text-gray-700; }
     </style>
 </head>
 <body class="min-h-screen flex flex-col">
 
-    <!-- Top Navigation Bar -->
+    <!-- Top Navigation Bar for Desktop & Mobile Header -->
     <header class="bg-white shadow-md py-4 px-6 flex items-center justify-between sticky top-0 z-50">
         <div class="flex items-center">
+            <!-- SahaniShare Logo Placeholder -->
             <div class="text-primary-green text-2xl font-bold mr-2">
                 <i class="fas fa-hand-holding-heart"></i> SahaniShare
             </div>
         </div>
+        <!-- Desktop Navigation -->
         <nav class="hidden md:flex space-x-6">
             <a href="donor-dashboard.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Dashboard</a>
             <a href="add-donation.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Add Donation</a>
-            <a href="donor-history.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">History</a>
-            <a href="donor-requests.php" class="text-primary-green font-medium transition duration-200">Requests</a>
+            <a href="donor-requests.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">My Requests</a>
             <a href="#" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Profile</a>
             <a href="logout.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Logout</a>
         </nav>
+        <!-- Mobile Hamburger Icon -->
         <button id="mobile-menu-button" class="md:hidden p-2 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-green">
             <i class="fas fa-bars text-neutral-dark text-xl"></i>
         </button>
@@ -247,11 +282,8 @@ $conn->close();
             <div class="text-primary-green text-xl font-bold mb-8">SahaniShare</div>
             <ul class="space-y-4">
                 <li><a href="login-register.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Login/Register</a></li>
-                <li><a href="donor-dashboard.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Dashboard</a></li>
+                <li><a href="donor-dashboard.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Donor Dashboard</a></li>
                 <li><a href="add-donation.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Add Donation</a></li>
-                <li><a href="donor-history.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">History</a></li>
-                <li><a href="donor-requests.php" class="block text-primary-green font-medium py-2">Requests</a></li>
-                <li><a href="#" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Profile</a></li>
                 <li><a href="recipient-dashboard.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Recipient Dashboard</a></li>
                 <li><a href="admin-panel.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Admin Panel</a></li>
                 <li><a href="reports.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Reports</a></li>
@@ -264,109 +296,142 @@ $conn->close();
     <main class="flex-grow container mx-auto p-4 md:p-8">
         <h1 class="text-4xl font-bold text-neutral-dark mb-8 text-center md:text-left">Requests for Your Donations</h1>
         <div class="card p-6">
-            <?php echo $message; // Display messages ?>
-            <p class="text-gray-700 mb-6">Here you can view and manage requests made by recipients for your donated food items.</p>
+            <?php echo $message; // Display messages from session ?>
 
-            <?php if (empty($donations_with_requests)): ?>
-                <p class="text-gray-600 text-center">No donations with active requests found at the moment.</p>
-            <?php else: ?>
-                <?php foreach ($donations_with_requests as $donation): ?>
-                    <div class="mb-8 p-6 bg-white rounded-lg shadow-md border border-gray-200">
-                        <h3 class="text-2xl font-bold text-primary-green mb-3 flex items-center">
-                            <i class="fas fa-box-open mr-2"></i>
-                            <?php echo htmlspecialchars($donation['description']); ?>
-                            <span class="ml-auto text-sm text-gray-600 font-normal">
-                                Available: <?php echo htmlspecialchars($donation['quantity']) . ' ' . htmlspecialchars($donation['unit']); ?>
-                            </span>
-                        </h3>
-                        <p class="text-gray-600 mb-4">Expires: <?php echo date('Y-m-d H:i', strtotime($donation['expiry_time'])); ?> | Status: <span class="status-tag <?php
-                                $status_class = '';
-                                switch ($donation['status']) {
-                                    case 'pending': $status_class = 'status-pending'; break;
-                                    case 'approved': $status_class = 'status-approved'; break;
-                                    case 'fulfilled': $status_class = 'bg-green-700 text-white'; break; // Darker green for fulfilled donation
-                                    case 'rejected': $status_class = 'status-rejected'; break;
-                                }
-                                echo $status_class;
-                            ?>"><?php echo htmlspecialchars(ucfirst($donation['status'])); ?></span>
-                        </p>
-
-                        <h4 class="text-xl font-semibold text-neutral-dark mb-3">Incoming Requests:</h4>
-                        <?php if (empty($donation['requests'])): ?>
-                            <p class="text-gray-500">No requests for this donation yet.</p>
-                        <?php else: ?>
-                            <div class="space-y-3">
-                                <?php foreach ($donation['requests'] as $request): ?>
-                                    <div class="request-item flex flex-col md:flex-row items-start md:items-center justify-between">
-                                        <div class="mb-2 md:mb-0">
-                                            <p class="font-semibold text-lg"><?php echo htmlspecialchars($request['requested_quantity']) . ' ' . htmlspecialchars($donation['unit']) . ' requested by ' . htmlspecialchars($request['recipient_org_name']); ?></p>
-                                            <p class="text-sm text-gray-600">Email: <?php echo htmlspecialchars($request['recipient_email']); ?> | Requested: <?php echo date('Y-m-d H:i', strtotime($request['requested_at'])); ?></p>
-                                        </div>
-                                        <div class="flex flex-wrap gap-2 md:ml-auto">
+            <div class="mb-8">
+                <h2 class="text-2xl font-semibold text-neutral-dark mb-4">Pending/Active Requests</h2>
+                <?php if (empty($requests_for_my_donations)): ?>
+                    <p class="text-gray-600">No requests have been made for your donations yet, or all requests have been fulfilled.</p>
+                <?php else: ?>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full bg-white rounded-lg shadow overflow-hidden">
+                            <thead class="bg-gray-200">
+                                <tr>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Donation</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Requested Qty</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Requested By</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Requested On</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Status</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Actions</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($requests_for_my_donations as $request): ?>
+                                    <tr class="border-b last:border-b-0 hover:bg-gray-50">
+                                        <td class="py-3 px-4 text-sm text-gray-800">
+                                            <?php echo htmlspecialchars($request['donation_description']); ?>
+                                            <span class="block text-xs text-gray-500">Available: <?php echo htmlspecialchars($request['donation_quantity']) . ' ' . htmlspecialchars($request['donation_unit']); ?></span>
+                                        </td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($request['requested_quantity']) . ' ' . htmlspecialchars($request['donation_unit']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800">
+                                            <?php echo htmlspecialchars($request['recipient_org']); ?>
+                                            <span class="block text-xs text-gray-500"><?php echo htmlspecialchars($request['recipient_email']); ?></span>
+                                        </td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo date('Y-m-d H:i', strtotime($request['requested_at'])); ?></td>
+                                        <td class="py-3 px-4 text-sm">
                                             <?php
-                                                $request_status_class = '';
-                                                switch ($request['status']) {
-                                                    case 'pending': $request_status_class = 'status-pending'; break; // Orange
-                                                    case 'approved': $request_status_class = 'status-approved'; break; // Primary Green
-                                                    case 'dispatched': $request_status_class = 'bg-indigo-500 text-white'; break; // New color for dispatched
-                                                    case 'collected': $request_status_class = 'status-fulfilled'; break; // Darker green for collected
-                                                    case 'rejected': $request_status_class = 'status-rejected'; break; // Red
+                                                $status_class = '';
+                                                switch ($request['request_status']) {
+                                                    case 'pending': $status_class = 'status-pending'; break;
+                                                    case 'approved': $status_class = 'status-approved'; break;
+                                                    case 'dispatched': $status_class = 'status-dispatched'; break;
+                                                    case 'collected': $status_class = 'status-collected'; break;
+                                                    case 'rejected': $status_class = 'status-rejected'; break;
+                                                    default: $status_class = 'bg-gray-200 text-gray-700'; break; // Fallback for unknown status
                                                 }
                                             ?>
-                                            <span class="status-tag <?php echo $request_status_class; ?>"><?php echo htmlspecialchars(ucfirst($request['status'])); ?></span>
-
-                                            <?php if ($request['status'] === 'pending'): // Only show Approve/Reject for pending requests ?>
-                                                <form method="POST" action="donor-requests.php" class="inline-block">
-                                                    <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
-                                                    <button type="submit" name="request_action" value="approve_request" class="bg-primary-green text-white px-3 py-1 text-sm rounded-md hover:bg-primary-green-dark transition duration-200">
-                                                        <i class="fas fa-check mr-1"></i> Approve
-                                                    </button>
-                                                </form>
-                                                <form method="POST" action="donor-requests.php" class="inline-block">
-                                                    <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
-                                                    <button type="submit" name="request_action" value="reject_request" class="bg-red-500 text-white px-3 py-1 text-sm rounded-md hover:bg-red-600 transition duration-200">
-                                                        <i class="fas fa-times mr-1"></i> Reject
-                                                    </button>
-                                                </form>
-                                            <?php elseif ($request['status'] === 'approved'): // Show "Mark Dispatched" and "Mark Collected (direct)" if approved ?>
-                                                <form method="POST" action="donor-requests.php" class="inline-block">
-                                                    <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
-                                                    <button type="submit" name="request_action" value="mark_dispatched" class="bg-blue-500 text-white px-3 py-1 text-sm rounded-md hover:bg-blue-600 transition duration-200">
-                                                        <i class="fas fa-truck mr-1"></i> Mark Dispatched
-                                                    </button>
-                                                </form>
-                                                <form method="POST" action="donor-requests.php" class="inline-block">
-                                                    <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
-                                                    <button type="submit" name="request_action" value="mark_collected" class="bg-green-600 text-white px-3 py-1 text-sm rounded-md hover:bg-green-700 transition duration-200">
-                                                        <i class="fas fa-handshake mr-1"></i> Mark Collected (Direct)
-                                                    </button>
-                                                </form>
-                                            <?php elseif ($request['status'] === 'dispatched'): // Show "Mark Collected" if dispatched ?>
-                                                <form method="POST" action="donor-requests.php" class="inline-block">
-                                                    <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
-                                                    <button type="submit" name="request_action" value="mark_collected" class="bg-green-600 text-white px-3 py-1 text-sm rounded-md hover:bg-green-700 transition duration-200">
-                                                        <i class="fas fa-handshake mr-1"></i> Mark Collected
-                                                    </button>
-                                                </form>
-                                            <?php endif; ?>
-                                        </div>
-                                    </div>
+                                            <span class="status-tag <?php echo $status_class; ?>"><?php echo htmlspecialchars(ucfirst($request['request_status'])); ?></span>
+                                        </td>
+                                        <td class="py-3 px-4 text-sm">
+                                            <div class="flex flex-wrap gap-2">
+                                                <?php if ($request['request_status'] === 'pending'): ?>
+                                                    <form method="POST" action="donor-requests.php" class="inline-block">
+                                                        <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
+                                                        <input type="hidden" name="donation_id" value="<?php echo $request['donation_id']; ?>">
+                                                        <button type="submit" name="action" value="approve" class="bg-green-500 text-white px-3 py-1 rounded-md hover:bg-green-600 transition-colors text-xs">Approve</button>
+                                                    </form>
+                                                    <form method="POST" action="donor-requests.php" class="inline-block">
+                                                        <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
+                                                        <input type="hidden" name="donation_id" value="<?php echo $request['donation_id']; ?>">
+                                                        <button type="submit" name="action" value="reject" class="bg-red-500 text-white px-3 py-1 rounded-md hover:bg-red-600 transition-colors text-xs">Reject</button>
+                                                    </form>
+                                                <?php elseif ($request['request_status'] === 'approved'): ?>
+                                                    <form method="POST" action="donor-requests.php" class="inline-block">
+                                                        <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
+                                                        <input type="hidden" name="donation_id" value="<?php echo $request['donation_id']; ?>">
+                                                        <button type="submit" name="action" value="dispatch" class="bg-indigo-500 text-white px-3 py-1 rounded-md hover:bg-indigo-600 transition-colors text-xs">Dispatch</button>
+                                                    </form>
+                                                    <form method="POST" action="donor-requests.php" class="inline-block">
+                                                        <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
+                                                        <input type="hidden" name="donation_id" value="<?php echo $request['donation_id']; ?>">
+                                                        <button type="submit" name="action" value="mark_collected" class="bg-purple-500 text-white px-3 py-1 rounded-md hover:bg-purple-600 transition-colors text-xs">Mark Collected</button>
+                                                    </form>
+                                                <?php elseif ($request['request_status'] === 'dispatched'): ?>
+                                                    <form method="POST" action="donor-requests.php" class="inline-block">
+                                                        <input type="hidden" name="request_id" value="<?php echo $request['request_id']; ?>">
+                                                        <input type="hidden" name="donation_id" value="<?php echo $request['donation_id']; ?>">
+                                                        <button type="submit" name="action" value="mark_collected" class="bg-purple-500 text-white px-3 py-1 rounded-md hover:bg-purple-600 transition-colors text-xs">Mark Collected</button>
+                                                    </form>
+                                                <?php elseif ($request['request_status'] === 'collected' || $request['request_status'] === 'rejected'): ?>
+                                                    <span class="text-gray-500 text-xs">No actions available</span>
+                                                <?php else: ?>
+                                                    <span class="text-red-500 text-xs">Error: Unknown Status</span>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
+                                    </tr>
                                 <?php endforeach; ?>
-                            </div>
-                        <?php endif; ?>
+                            </tbody>
+                        </table>
                     </div>
-                <?php endforeach; ?>
-            <?php endif; ?>
+                <?php endif; ?>
+            </div>
+
+            <!-- Fulfilled Donations Section -->
+            <div>
+                <h2 class="text-2xl font-semibold text-neutral-dark mb-4">My Fulfilled Donations</h2>
+                <?php if (empty($my_fulfilled_donations)): ?>
+                    <p class="text-gray-600">No donations have been fully fulfilled yet.</p>
+                <?php else: ?>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full bg-white rounded-lg shadow overflow-hidden">
+                            <thead class="bg-gray-200">
+                                <tr>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Description</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Original Qty</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Expiry</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Created On</th>
+                                    <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Status</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach ($my_fulfilled_donations as $donation): ?>
+                                    <tr class="border-b last:border-b-0 hover:bg-gray-50">
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['description']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['quantity']) . ' ' . htmlspecialchars($donation['unit']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo date('Y-m-d H:i', strtotime($donation['expiry_time'])); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo date('Y-m-d', strtotime($donation['created_at'])); ?></td>
+                                        <td class="py-3 px-4 text-sm">
+                                            <!-- Accessing $donation['status'] is now safe -->
+                                            <span class="status-tag status-fulfilled"><?php echo htmlspecialchars(ucfirst($donation['status'])); ?></span>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php endif; ?>
+            </div>
         </div>
     </main>
 
     <script>
+        // Mobile Menu Logic
         const mobileMenuButton = document.getElementById('mobile-menu-button');
         const mobileMenu = document.getElementById('mobile-menu');
         const mobileMenuOverlay = document.getElementById('mobile-menu-overlay');
         const closeMobileMenuButton = document.getElementById('close-mobile-menu');
 
-        // Toggle mobile menu
         mobileMenuButton.addEventListener('click', () => {
             mobileMenu.classList.add('mobile-menu-open');
             mobileMenuOverlay.classList.remove('hidden');
@@ -386,5 +451,10 @@ $conn->close();
     </script>
 </body>
 </html>
+
+
+
+
+
 
 
