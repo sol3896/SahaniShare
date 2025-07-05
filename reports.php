@@ -3,7 +3,7 @@
 session_start();
 
 // Include the database connection file
-include_once 'db_connection.php';
+include_once dirname(__FILE__) . '/db_connection.php';
 
 // Check if user is logged in and is an admin or moderator
 if (!isset($_SESSION['user_id']) || ($_SESSION['user_role'] !== 'admin' && $_SESSION['user_role'] !== 'moderator')) {
@@ -11,317 +11,380 @@ if (!isset($_SESSION['user_id']) || ($_SESSION['user_role'] !== 'admin' && $_SES
     exit();
 }
 
+$user_id = $_SESSION['user_id'];
+$user_role = $_SESSION['user_role'];
+$organization_name = $_SESSION['organization_name'];
+
 $conn = get_db_connection();
 
-// --- Data for Charts (Example fetches) ---
-// You would dynamically fetch data based on date ranges selected by the user.
-// For now, these are static dummy data or basic aggregates.
+// --- Fetch Report Data ---
 
-// Donations Over Time (e.g., last 5 weeks)
-$donations_over_time = [
-    'labels' => ['Week 1', 'Week 2', 'Week 3', 'Week 4', 'Week 5'],
-    'data' => [0, 0, 0, 0, 0] // Default to 0, fetch actual counts
-];
-// Example: Fetch last 5 weeks data
-// $stmt = $conn->prepare("SELECT COUNT(*) as count, WEEK(created_at) as week_num FROM donations WHERE created_at >= CURDATE() - INTERVAL 5 WEEK GROUP BY WEEK(created_at) ORDER BY WEEK(created_at)");
-// Execute and populate $donations_over_time['data']
+// 1. User Statistics
+$total_users = 0;
+$active_users = 0;
+$pending_users = 0;
+$rejected_users = 0;
+$inactive_users = 0;
+$total_donors = 0;
+$total_recipients = 0;
 
-// Food Type Distribution
-$food_type_distribution = [
-    'labels' => ['Produce', 'Baked Goods', 'Prepared Meals', 'Dairy', 'Pantry Staples', 'Other'],
-    'data' => [0, 0, 0, 0, 0, 0]
-];
-$stmt = $conn->prepare("SELECT category, COUNT(*) as count FROM donations GROUP BY category");
-$stmt->execute();
-$result = $stmt->get_result();
-while ($row = $result->fetch_assoc()) {
-    $category_index = array_search($row['category'], $food_type_distribution['labels']);
-    if ($category_index !== false) {
-        $food_type_distribution['data'][$category_index] = $row['count'];
-    } else {
-        // If category not in predefined labels, add to 'Other' or add new label
-        $food_type_distribution['data'][count($food_type_distribution['data']) - 1] += $row['count']; // Add to 'Other'
-    }
+$stmt_users_stats = $conn->prepare("SELECT COUNT(*) AS total, 
+                                           SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+                                           SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                                           SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                                           SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END) AS inactive,
+                                           SUM(CASE WHEN role = 'donor' THEN 1 ELSE 0 END) AS donors,
+                                           SUM(CASE WHEN role = 'recipient' THEN 1 ELSE 0 END) AS recipients
+                                    FROM users");
+if ($stmt_users_stats && $stmt_users_stats->execute()) {
+    $result = $stmt_users_stats->get_result();
+    $row = $result->fetch_assoc();
+    $total_users = $row['total'];
+    $active_users = $row['active'];
+    $pending_users = $row['pending'];
+    $rejected_users = $row['rejected'];
+    $inactive_users = $row['inactive'];
+    $total_donors = $row['donors'];
+    $total_recipients = $row['recipients'];
+    $stmt_users_stats->close();
+} else {
+    error_log("SahaniShare Reports Error: Failed to fetch user statistics: " . $conn->error);
 }
-$stmt->close();
 
-// Fulfillment Rates
-$fulfilled_count = 0;
-$pending_requests_count = 0;
-$rejected_requests_count = 0;
+// 2. Donation Statistics
+$total_donations = 0;
+$pending_donations = 0;
+$approved_donations = 0;
+$fulfilled_donations = 0;
+$rejected_donations = 0;
 
-$stmt = $conn->prepare("SELECT COUNT(*) FROM requests WHERE status = 'collected'");
-$stmt->execute();
-$stmt->bind_result($fulfilled_count);
-$stmt->fetch();
-$stmt->close();
+$stmt_donations_stats = $conn->prepare("SELECT COUNT(*) AS total,
+                                               SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                                               SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
+                                               SUM(CASE WHEN status = 'fulfilled' THEN 1 ELSE 0 END) AS fulfilled,
+                                               SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+                                        FROM donations");
+if ($stmt_donations_stats && $stmt_donations_stats->execute()) {
+    $result = $stmt_donations_stats->get_result();
+    $row = $result->fetch_assoc();
+    $total_donations = $row['total'];
+    $pending_donations = $row['pending'];
+    $approved_donations = $row['approved'];
+    $fulfilled_donations = $row['fulfilled'];
+    $rejected_donations = $row['rejected'];
+    $stmt_donations_stats->close();
+} else {
+    error_log("SahaniShare Reports Error: Failed to fetch donation statistics: " . $conn->error);
+}
 
-$stmt = $conn->prepare("SELECT COUNT(*) FROM requests WHERE status = 'pending'");
-$stmt->execute();
-$stmt->bind_result($pending_requests_count);
-$stmt->fetch();
-$stmt->close();
+// 3. Request Statistics (assuming a 'requests' table exists)
+$total_requests = 0;
+$pending_requests = 0;
+$accepted_requests = 0;
+$completed_requests = 0;
+$cancelled_requests = 0;
 
-$stmt = $conn->prepare("SELECT COUNT(*) FROM requests WHERE status = 'rejected'");
-$stmt->execute();
-$stmt->bind_result($rejected_requests_count);
-$stmt->fetch();
-$stmt->close();
-
-$total_requests = $fulfilled_count + $pending_requests_count + $rejected_requests_count;
-$fulfillment_rate_data = [
-    ($total_requests > 0 ? ($fulfilled_count / $total_requests) * 100 : 0),
-    ($total_requests > 0 ? ($pending_requests_count / $total_requests) * 100 : 0),
-    ($total_requests > 0 ? ($rejected_requests_count / $total_requests) * 100 : 0)
-];
+// This query assumes a 'requests' table with a 'status' column (e.g., 'pending', 'accepted', 'completed', 'cancelled')
+$stmt_requests_stats = $conn->prepare("SELECT COUNT(*) AS total,
+                                              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                                              SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) AS accepted,
+                                              SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                                              SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+                                       FROM requests");
+if ($stmt_requests_stats && $stmt_requests_stats->execute()) {
+    $result = $stmt_requests_stats->get_result();
+    $row = $result->fetch_assoc();
+    $total_requests = $row['total'];
+    $pending_requests = $row['pending'];
+    $accepted_requests = $row['accepted'];
+    $completed_requests = $row['completed'];
+    $cancelled_requests = $row['cancelled'];
+    $stmt_requests_stats->close();
+} else {
+    // This might fail if the 'requests' table doesn't exist yet or has different columns.
+    // Log a warning, but don't stop the page.
+    error_log("SahaniShare Reports Warning: Failed to fetch request statistics (requests table might be missing or columns differ): " . $conn->error);
+}
 
 
 $conn->close();
 ?>
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SahaniShare - [Your Page Title Here]</title>
+    <title>SahaniShare - Reports</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
-
     <!-- Google Fonts: Inter for body, Montserrat for headings -->
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Montserrat:wght@400;500;600;700&display=swap" rel="stylesheet">
-
     <!-- Font Awesome for Icons -->
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
     <!-- Link to external style.css -->
     <link rel="stylesheet" href="style.css">
-    <!-- Inline style to apply Inter as base font (Montserrat is applied in style.css for headings) -->
     <style>
+        /* Define custom colors here to match your preferred aesthetic */
+        :root {
+            --primary-green: #A7D397; /* Your preferred lighter green */
+            --primary-green-dark: #8bbd78; /* A darker shade for hover states */
+            --neutral-dark: #333; /* From your original style.css, assuming it's a dark text color */
+            --accent-orange: #FF8C00; /* From your original style.css, assuming it's an accent color */
+        }
+
         body {
             font-family: 'Inter', sans-serif;
-            @apply bg-gray-100 text-gray-800;
+            background-color: #f3f4f6; /* bg-gray-100 */
+            color: #374151; /* text-gray-800 */
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
         }
-        /* No need for h1, h2, h3 styles here, they are in style.css now */
+        .sidebar {
+            width: 250px;
+            background-color: var(--primary-green); /* primary-green */
+            color: white;
+            padding: 1.5rem;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            min-height: 100vh; /* Ensure it takes full height */
+        }
+        .main-content {
+            flex-grow: 1;
+            padding: 1rem 2rem; /* p-4 md:p-8 */
+            margin-left: 250px; /* Offset for sidebar */
+        }
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 100%;
+                height: auto;
+                position: relative;
+                min-height: auto; /* Reset for mobile */
+            }
+            .main-content {
+                margin-left: 0;
+            }
+        }
+        /* Card styling */
+        .card {
+            background-color: white;
+            border-radius: 0.5rem; /* rounded-lg */
+            box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1), 0 1px 2px 0 rgba(0, 0, 0, 0.06); /* shadow */
+            padding: 1.5rem; /* p-6 */
+        }
+        /* Status tags for users and donations */
+        .status-tag {
+            padding: 0.25rem 0.75rem;
+            border-radius: 9999px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .status-pending { background-color: #FFEDD5; color: #9A3412; } /* bg-orange-100 text-orange-800 */
+        .status-approved { background-color: #D1FAE5; color: #065F46; } /* bg-green-100 text-green-800 */
+        .status-rejected { background-color: #FEE2E2; color: #991B1B; } /* bg-red-100 text-red-800 */
+        .status-inactive { background-color: #E5E7EB; color: #4B5563; } /* bg-gray-100 text-gray-800 */
+        .status-fulfilled { background-color: #059669; color: white; } /* bg-green-600 text-white */
+        
+        /* Document Verification Status */
+        .doc-verified-true { color: #059669; } /* text-green-600 */
+        .doc-verified-false { color: #EF4444; } /* text-red-500 */
+
+        /* Ensure specific elements use the custom green */
+        .bg-primary-green { background-color: var(--primary-green); }
+        .hover\:bg-primary-green-dark:hover { background-color: var(--primary-green-dark); }
+        .text-primary-green { color: var(--primary-green); }
+        .hover\:text-primary-green:hover { color: var(--primary-green); }
+        .focus\:ring-primary-green:focus { --tw-ring-color: var(--primary-green); }
+        .focus\:border-primary-green:focus { border-color: var(--primary-green); }
+        .text-accent-orange { color: var(--accent-orange); }
+        .btn-primary { /* For the general purpose primary button */
+            background-color: var(--primary-green);
+            color: white;
+            @apply px-4 py-2 rounded-md hover:bg-primary-green-dark transition-colors;
+        }
     </style>
 </head>
-<body class="min-h-screen flex flex-col">
+<body class="min-h-screen flex flex-col md:flex-row">
 
-    <!-- Top Navigation Bar for Desktop & Mobile Header -->
-    <header class="bg-white shadow-md py-4 px-6 flex items-center justify-between sticky top-0 z-50">
-        <div class="flex items-center">
-            <!-- SahaniShare Logo Placeholder -->
-            <div class="text-primary-green text-2xl font-bold mr-2">
-                <i class="fas fa-hand-holding-heart"></i> SahaniShare
-            </div>
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar bg-primary-green text-white flex flex-col p-6 shadow-lg md:min-h-screen">
+        <div class="text-3xl font-bold mb-8 text-center">
+            <i class="fas fa-tools"></i> Admin Panel
         </div>
-        <!-- Desktop Navigation -->
-        <nav class="hidden md:flex space-x-6">
-            <a href="admin-panel.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Dashboard</a>
-            <a href="reports.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Reports</a>
-            <a href="logout.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Logout</a>
-        </nav>
-        <!-- Mobile Hamburger Icon -->
-        <button id="mobile-menu-button" class="md:hidden p-2 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-green">
-            <i class="fas fa-bars text-neutral-dark text-xl"></i>
-        </button>
-    </header>
-
-    <!-- Mobile Menu Overlay -->
-    <div id="mobile-menu-overlay" class="fixed inset-0 bg-gray-800 bg-opacity-75 z-40 hidden md:hidden"></div>
-    <nav id="mobile-menu" class="fixed top-0 right-0 w-64 h-full bg-white shadow-lg z-50 transform translate-x-full transition-transform duration-300 ease-in-out md:hidden">
-        <div class="p-6">
-            <button id="close-mobile-menu" class="absolute top-4 right-4 text-gray-500 hover:text-gray-700">
-                <i class="fas fa-times text-xl"></i>
-            </button>
-            <div class="text-primary-green text-xl font-bold mb-8">SahaniShare</div>
+        <nav class="flex-grow">
             <ul class="space-y-4">
-                <li><a href="login-register.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Login/Register</a></li>
-                <li><a href="donor-dashboard.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Donor Dashboard</a></li>
-                <li><a href="add-donation.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Add Donation</a></li>
-                <li><a href="recipient-dashboard.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Recipient Dashboard</a></li>
-                <li><a href="admin-panel.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Admin Panel</a></li>
-                <li><a href="reports.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Reports</a></li>
-                <li><a href="logout.php" class="block text-neutral-dark hover:text-primary-green font-medium py-2">Logout</a></li>
+                <li>
+                    <a href="admin-panel.php?view=dashboard" class="flex items-center p-3 rounded-lg hover:bg-primary-green-dark transition-colors">
+                        <i class="fas fa-tachometer-alt mr-3"></i> Dashboard
+                    </a>
+                </li>
+                <li>
+                    <a href="admin-panel.php?view=users" class="flex items-center p-3 rounded-lg hover:bg-primary-green-dark transition-colors">
+                        <i class="fas fa-users mr-3"></i> Manage Users
+                    </a>
+                </li>
+                <li>
+                    <a href="admin-panel.php?view=donations" class="flex items-center p-3 rounded-lg hover:bg-primary-green-dark transition-colors">
+                        <i class="fas fa-boxes mr-3"></i> Manage Donations
+                    </a>
+                </li>
+                <li>
+                    <a href="reports.php" class="flex items-center p-3 rounded-lg hover:bg-primary-green-dark transition-colors bg-primary-green-dark">
+                        <i class="fas fa-chart-bar mr-3"></i> Reports
+                    </a>
+                </li>
+                <li>
+                    <a href="#" class="flex items-center p-3 rounded-lg hover:bg-primary-green-dark transition-colors">
+                        <i class="fas fa-cogs mr-3"></i> Settings
+                    </a>
+                </li>
             </ul>
+        </nav>
+        <div class="mt-8 text-center">
+            <p class="text-sm font-light">Logged in as:</p>
+            <p class="font-medium"><?php echo htmlspecialchars($organization_name); ?></p>
+            <p class="text-xs italic">(<?php echo htmlspecialchars(ucfirst($user_role)); ?>)</p>
+            <a href="logout.php" class="mt-4 inline-block bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-md transition-colors text-sm">
+                <i class="fas fa-sign-out-alt mr-2"></i> Logout
+            </a>
         </div>
-    </nav>
+    </aside>
 
     <!-- Main Content Area -->
-    <main class="flex-grow container mx-auto p-4 md:p-8">
-        <h1 class="text-4xl font-bold text-neutral-dark mb-8 text-center md:text-left">Reports & Analytics</h1>
-        <div class="card p-6">
-            <p class="text-gray-700 mb-6">Gain insights into SahaniShare's impact with detailed reports and analytics.</p>
+    <main class="main-content flex-grow p-4 md:p-8">
+        <h1 class="text-4xl font-bold text-neutral-dark mb-8 text-center md:text-left">System Reports</h1>
 
-            <div class="mb-6 flex flex-col md:flex-row gap-4 justify-between items-center">
-                <div class="flex flex-wrap gap-2">
-                    <button class="bg-gray-200 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-300 transition-colors">Last 7 Days</button>
-                    <button class="bg-primary-green text-white py-2 px-4 rounded-md hover:bg-primary-green-dark transition-colors">Last 30 Days</button>
-                    <button class="bg-gray-200 text-gray-700 py-2 px-4 rounded-md hover:bg-gray-300 transition-colors">Last 90 Days</button>
-                    <input type="date" class="py-2 px-3 rounded-md border border-gray-300">
-                    <span>-</span>
-                    <input type="date" class="py-2 px-3 rounded-md border border-gray-300">
-                </div>
-                <button class="btn-primary !w-auto !py-2 !px-4"><i class="fas fa-download mr-2"></i> Download Report</button>
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+
+            <!-- User Statistics Card -->
+            <div class="card p-6">
+                <h3 class="text-2xl font-semibold text-neutral-dark mb-4"><i class="fas fa-users mr-2 text-primary-green"></i> User Statistics</h3>
+                <ul class="space-y-2 text-gray-700">
+                    <li class="flex justify-between items-center">
+                        <span>Total Users:</span>
+                        <span class="font-bold text-lg"><?php echo $total_users; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Active Users:</span>
+                        <span class="font-semibold text-green-600"><?php echo $active_users; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Pending Users:</span>
+                        <span class="font-semibold text-orange-600"><?php echo $pending_users; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Rejected Users:</span>
+                        <span class="font-semibold text-red-600"><?php echo $rejected_users; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Inactive Users:</span>
+                        <span class="font-semibold text-gray-600"><?php echo $inactive_users; ?></span>
+                    </li>
+                    <li class="border-t pt-2 mt-2 flex justify-between items-center">
+                        <span>Total Donors:</span>
+                        <span class="font-bold"><?php echo $total_donors; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Total Recipients:</span>
+                        <span class="font-bold"><?php echo $total_recipients; ?></span>
+                    </li>
+                </ul>
             </div>
 
-            <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
-                <!-- Chart 1: Donations Over Time -->
-                <div class="card p-4">
-                    <h3 class="text-xl font-semibold text-neutral-dark mb-4">Donations Over Time</h3>
-                    <canvas id="donationsChart"></canvas>
-                </div>
-
-                <!-- Chart 2: Food Type Distribution -->
-                <div class="card p-4">
-                    <h3 class="text-xl font-semibold text-neutral-dark mb-4">Food Type Distribution</h3>
-                    <canvas id="foodTypeChart"></canvas>
-                </div>
-
-                <!-- Chart 3: Fulfillment Rates -->
-                <div class="card p-4 lg:col-span-2">
-                    <h3 class="text-xl font-semibold text-neutral-dark mb-4">Fulfillment Rates</h3>
-                    <canvas id="fulfillmentChart"></canvas>
-                </div>
+            <!-- Donation Statistics Card -->
+            <div class="card p-6">
+                <h3 class="text-2xl font-semibold text-neutral-dark mb-4"><i class="fas fa-boxes mr-2 text-primary-green"></i> Donation Statistics</h3>
+                <ul class="space-y-2 text-gray-700">
+                    <li class="flex justify-between items-center">
+                        <span>Total Donations:</span>
+                        <span class="font-bold text-lg"><?php echo $total_donations; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Pending Donations:</span>
+                        <span class="font-semibold text-orange-600"><?php echo $pending_donations; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Approved Donations:</span>
+                        <span class="font-semibold text-blue-600"><?php echo $approved_donations; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Fulfilled Donations:</span>
+                        <span class="font-semibold text-green-600"><?php echo $fulfilled_donations; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Rejected Donations:</span>
+                        <span class="font-semibold text-red-600"><?php echo $rejected_donations; ?></span>
+                    </li>
+                </ul>
             </div>
+
+            <!-- Request Statistics Card -->
+            <div class="card p-6">
+                <h3 class="text-2xl font-semibold text-neutral-dark mb-4"><i class="fas fa-hand-holding-heart mr-2 text-primary-green"></i> Request Statistics</h3>
+                <ul class="space-y-2 text-gray-700">
+                    <li class="flex justify-between items-center">
+                        <span>Total Requests:</span>
+                        <span class="font-bold text-lg"><?php echo $total_requests; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Pending Requests:</span>
+                        <span class="font-semibold text-orange-600"><?php echo $pending_requests; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Accepted Requests:</span>
+                        <span class="font-semibold text-blue-600"><?php echo $accepted_requests; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Completed Requests:</span>
+                        <span class="font-semibold text-green-600"><?php echo $completed_requests; ?></span>
+                    </li>
+                    <li class="flex justify-between items-center">
+                        <span>Cancelled Requests:</span>
+                        <span class="font-semibold text-red-600"><?php echo $cancelled_requests; ?></span>
+                    </li>
+                </ul>
+            </div>
+
+            <!-- You can add more detailed reports here, e.g., Top Donors, Donations by Category, etc. -->
+
         </div>
     </main>
 
     <script>
+        // Mobile Menu Toggle Logic (copied from admin-panel.php for consistency)
         const mobileMenuButton = document.getElementById('mobile-menu-button');
         const mobileMenu = document.getElementById('mobile-menu');
         const mobileMenuOverlay = document.getElementById('mobile-menu-overlay');
         const closeMobileMenuButton = document.getElementById('close-mobile-menu');
 
-        // Toggle mobile menu
-        mobileMenuButton.addEventListener('click', () => {
-            mobileMenu.classList.add('mobile-menu-open');
-            mobileMenuOverlay.classList.remove('hidden');
-        });
+        if (mobileMenuButton) {
+            mobileMenuButton.addEventListener('click', () => {
+                mobileMenu.classList.add('mobile-menu-open');
+                mobileMenuOverlay.classList.remove('hidden');
+            });
+        }
 
-        closeMobileMenuButton.addEventListener('click', () => {
-            mobileMenu.classList.remove('mobile-menu-open');
-            mobileMenuOverlay.classList.add('hidden');
-        });
-
-        mobileMenuOverlay.addEventListener('click', () => {
-            mobileMenu.classList.remove('mobile-menu-open');
-            mobileMenuOverlay.classList.add('hidden');
-        });
-
-        // PHP variables passed to JavaScript
-        const donationsLabels = <?php echo json_encode($donations_over_time['labels']); ?>;
-        const donationsData = <?php echo json_encode($donations_over_time['data']); ?>;
-
-        const foodTypeLabels = <?php echo json_encode($food_type_distribution['labels']); ?>;
-        const foodTypeData = <?php echo json_encode($food_type_distribution['data']); ?>;
-
-        const fulfillmentData = <?php echo json_encode($fulfillment_rate_data); ?>;
-
-
-        // Chart.js data and rendering (example data)
-        document.addEventListener('DOMContentLoaded', () => {
-            // Donations Over Time Chart
-            const donationsCtx = document.getElementById('donationsChart').getContext('2d');
-            new Chart(donationsCtx, {
-                type: 'line',
-                data: {
-                    labels: donationsLabels,
-                    datasets: [{
-                        label: 'Number of Donations',
-                        data: donationsData,
-                        borderColor: '#4CAF50',
-                        backgroundColor: 'rgba(76, 175, 80, 0.2)',
-                        fill: true,
-                        tension: 0.3
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { display: true }
-                    },
-                    scales: {
-                        y: { beginAtZero: true }
-                    }
+        if (closeMobileMenuButton) {
+            closeMobileMenuButton.addEventListener('click', () => {
+                mobileMenu.classList.remove('mobile-menu-open');
+                mobileMenuOverlay.classList.add('hidden');
+            });
+        }
+        
+        if (mobileMenuOverlay) {
+            mobileMenuOverlay.addEventListener('click', (event) => {
+                if (event.target === mobileMenuOverlay) {
+                    mobileMenu.classList.remove('mobile-menu-open');
+                    mobileMenuOverlay.classList.add('hidden');
                 }
             });
-
-            // Food Type Distribution Chart
-            const foodTypeCtx = document.getElementById('foodTypeChart').getContext('2d');
-            new Chart(foodTypeCtx, {
-                type: 'pie',
-                data: {
-                    labels: foodTypeLabels,
-                    datasets: [{
-                        label: 'Food Types',
-                        data: foodTypeData,
-                        backgroundColor: [
-                            '#4CAF50', // Primary Green
-                            '#FF9800', // Accent Orange
-                            '#8BC34A', // Lighter Green
-                            '#FFC107', // Lighter Orange
-                            '#607D8B',  // Blue-gray neutral
-                            '#757575' // Even more neutral for "Other"
-                        ],
-                        hoverOffset: 4
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: {
-                            position: 'bottom',
-                        }
-                    }
-                }
-            });
-
-            // Fulfillment Rates Chart
-            const fulfillmentCtx = document.getElementById('fulfillmentChart').getContext('2d');
-            new Chart(fulfillmentCtx, {
-                type: 'bar',
-                data: {
-                    labels: ['Fulfilled', 'Pending', 'Rejected'],
-                    datasets: [{
-                        label: 'Fulfillment Status',
-                        data: fulfillmentData,
-                        backgroundColor: [
-                            '#4CAF50', // Green for Fulfilled
-                            '#FF9800', // Orange for Pending
-                            '#F44336'  // Red for Rejected
-                        ],
-                        borderColor: [
-                            '#4CAF50',
-                            '#FF9800',
-                            '#F44336'
-                        ],
-                        borderWidth: 1
-                    }]
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    plugins: {
-                        legend: { display: false }
-                    },
-                    scales: {
-                        y: {
-                            beginAtZero: true,
-                            max: 100,
-                            ticks: {
-                                callback: function(value) {
-                                    return value + '%';
-                                }
-                            }
-                        }
-                    }
-                }
-            });
-        });
+        }
     </script>
 </body>
 </html>
+
+
 

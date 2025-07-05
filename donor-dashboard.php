@@ -539,7 +539,7 @@ $conn->close();
     </main>
 
     <script>
-        console.log("donor-dashboard.php: JavaScript loaded."); // Debugging line
+        console.log("donor-dashboard.php: JavaScript loaded.");
 
         const mobileMenuButton = document.getElementById('mobile-menu-button');
         const mobileMenu = document.getElementById('mobile-menu');
@@ -547,23 +547,23 @@ $conn->close();
         const closeMobileMenuButton = document.getElementById('close-mobile-menu');
 
         // Toggle mobile menu
-        if (mobileMenuButton) { // Defensive check
+        if (mobileMenuButton) {
             mobileMenuButton.addEventListener('click', () => {
                 mobileMenu.classList.add('mobile-menu-open');
                 mobileMenuOverlay.classList.remove('hidden');
-                console.log("Mobile menu button clicked."); // Debugging line
+                console.log("Mobile menu button clicked.");
             });
         }
 
-        if (closeMobileMenuButton) { // Defensive check
+        if (closeMobileMenuButton) {
             closeMobileMenuButton.addEventListener('click', () => {
                 mobileMenu.classList.remove('mobile-menu-open');
                 mobileMenuOverlay.classList.add('hidden');
-                console.log("Close mobile menu button clicked."); // Debugging line
+                console.log("Close mobile menu button clicked.");
             });
         }
         
-        if (mobileMenuOverlay) { // Defensive check
+        if (mobileMenuOverlay) {
             mobileMenuOverlay.addEventListener('click', (event) => {
                 if (event.target === mobileMenuOverlay) {
                     mobileMenu.classList.remove('mobile-menu-open');
@@ -574,5 +574,6 @@ $conn->close();
     </script>
 </body>
 </html>
+
 
 

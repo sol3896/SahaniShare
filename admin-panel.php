@@ -37,34 +37,44 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['user_action'])) {
             case 'approve':
                 // Only admin can approve.
                 if ($user_role === 'admin') {
-                    // Check if documentation is verified BEFORE approving
-                    $stmt_check_doc_verified = $conn->prepare("SELECT document_verified FROM users WHERE id = ?");
-                    if (!$stmt_check_doc_verified) {
-                        throw new Exception("Prepare failed: " . $conn->error);
+                    // Fetch user's role, document path, and document verification status
+                    $stmt_check_user_details = $conn->prepare("SELECT role, document_path, document_verified FROM users WHERE id = ?");
+                    if (!$stmt_check_user_details) {
+                        throw new Exception("Prepare failed for user details check: " . $conn->error);
                     }
-                    $stmt_check_doc_verified->bind_param("i", $user_id_to_act_on);
-                    if (!$stmt_check_doc_verified->execute()) {
-                        throw new Exception("Execute failed: " . $stmt_check_doc_verified->error);
+                    $stmt_check_user_details->bind_param("i", $user_id_to_act_on);
+                    if (!$stmt_check_user_details->execute()) {
+                        throw new Exception("Execute failed for user details check: " . $stmt_check_user_details->error);
                     }
-                    $stmt_check_doc_verified->bind_result($is_doc_verified);
-                    $stmt_check_doc_verified->fetch();
-                    $stmt_check_doc_verified->close();
+                    $stmt_check_user_details->bind_result($user_role_to_check, $user_doc_path, $is_doc_verified);
+                    $stmt_check_user_details->fetch();
+                    $stmt_check_user_details->close();
 
-                    if (!$is_doc_verified) {
-                         $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Cannot approve user: Documentation is not yet verified. Please verify the document first.</div>';
-                         break; // Exit switch and go to redirect
+                    $can_approve = true;
+                    // For recipients, document verification is MANDATORY for approval.
+                    if ($user_role_to_check === 'recipient' && !$is_doc_verified) {
+                        $can_approve = false;
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Cannot approve Recipient: Documentation is not yet verified. Please verify the document first.</div>';
+                    } 
+                    // For donors, if they uploaded a document, it should be verified before approval.
+                    elseif ($user_role_to_check === 'donor' && !empty($user_doc_path) && !$is_doc_verified) {
+                        $can_approve = false;
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Cannot approve Donor: Document was uploaded but is not yet verified. Please verify the document first.</div>';
                     }
 
-                    $stmt = $conn->prepare("UPDATE users SET status = 'active', rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear rejection reason on approval
-                    if (!$stmt) {
-                        throw new Exception("Prepare failed: " . $conn->error);
-                    }
-                    $stmt->bind_param("i", $user_id_to_act_on);
-                    if (!$stmt->execute()) {
-                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to approve user: ' . htmlspecialchars($stmt->error) . '</div>';
-                    } else {
-                        $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User account approved successfully!</div>';
-                        $_SESSION['user_status_message_' . $user_id_to_act_on] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Welcome! Your account has been <strong>approved</strong> by an administrator. You can now log in and access your dashboard.</div>';
+                    if ($can_approve) {
+                        $stmt = $conn->prepare("UPDATE users SET status = 'active', rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear rejection reason on approval
+                        if (!$stmt) {
+                            throw new Exception("Prepare failed: " . $conn->error);
+                        }
+                        $stmt->bind_param("i", $user_id_to_act_on);
+                        if (!$stmt->execute()) {
+                            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to approve user: ' . htmlspecialchars($stmt->error) . '</div>';
+                        } else {
+                            $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User account approved successfully!</div>';
+                            // Store a message in session for the specific user to see on next login
+                            $_SESSION['user_status_message_' . $user_id_to_act_on] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Welcome! Your account has been <strong>approved</strong> by an administrator. You can now log in and access your dashboard.</div>';
+                        }
                     }
                 } else {
                     $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can approve users.</div>';
@@ -84,6 +94,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['user_action'])) {
                         $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to reject user: ' . htmlspecialchars($stmt->error) . '</div>';
                     } else {
                         $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">User account rejected. Reason: ' . htmlspecialchars($rejection_reason) . '</div>';
+                        // Store a message in session for the specific user to see on next login
                         $_SESSION['user_status_message_' . $user_id_to_act_on] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Your account has been <strong>rejected</strong>. Reason: ' . htmlspecialchars($rejection_reason) . '</div>';
                     }
                  }
@@ -124,7 +135,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['user_action'])) {
                 break;
             case 'verify_document':
                 if ($user_role === 'admin') {
-                    $stmt = $conn->prepare("UPDATE users SET document_verified = TRUE, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                    $stmt = $conn->prepare("UPDATE users SET document_verified = TRUE, rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear rejection reason on verification
                     if (!$stmt) {
                         throw new Exception("Prepare failed: " . $conn->error);
                     }
@@ -235,45 +246,22 @@ $pending_donations = [];
 $approved_donations = [];
 
 if ($current_view === 'dashboard' || $current_view === 'users') {
-    $stmt_pending_users = $conn->prepare("SELECT id, organization_name, email, role, status, created_at, rejection_reason, document_path, document_verified FROM users WHERE status = 'pending' ORDER BY created_at ASC");
-    if (!$stmt_pending_users) { die("Prepare failed for pending users: " . $conn->error); }
-    if (!$stmt_pending_users->execute()) { die("Execute failed for pending users: " . $stmt_pending_users->error); }
-    $result_pending_users = $stmt_pending_users->get_result();
-    if (!$result_pending_users) { die("Get result failed for pending users: " . $conn->error); }
-    while ($row = $result_pending_users->fetch_assoc()) {
-        $pending_users[] = $row;
+    // Fetch ALL users with their document details
+    $stmt_all_users = $conn->prepare("SELECT id, organization_name, email, role, status, created_at, rejection_reason, document_path, document_verified FROM users ORDER BY created_at ASC");
+    if (!$stmt_all_users) { die("Prepare failed for all users: " . $conn->error); }
+    if (!$stmt_all_users->execute()) { die("Execute failed for all users: " . $stmt_all_users->error); }
+    $result_all_users = $stmt_all_users->get_result();
+    if (!$result_all_users) { die("Get result failed for all users: " . $conn->error); }
+    
+    while ($row = $result_all_users->fetch_assoc()) {
+        // Populate the specific user arrays for display
+        if ($row['status'] === 'pending') $pending_users[] = $row;
+        elseif ($row['status'] === 'active') $active_users[] = $row;
+        elseif ($row['status'] === 'inactive') $inactive_users[] = $row;
+        elseif ($row['status'] === 'rejected') $rejected_users[] = $row;
     }
-    $stmt_pending_users->close();
 
-    $stmt_active_users = $conn->prepare("SELECT id, organization_name, email, role, status, created_at, rejection_reason, document_path, document_verified FROM users WHERE status = 'active' ORDER BY created_at DESC");
-    if (!$stmt_active_users) { die("Prepare failed for active users: " . $conn->error); }
-    if (!$stmt_active_users->execute()) { die("Execute failed for active users: " . $stmt_active_users->error); }
-    $result_active_users = $stmt_active_users->get_result();
-    if (!$result_active_users) { die("Get result failed for active users: " . $conn->error); }
-    while ($row = $result_active_users->fetch_assoc()) {
-        $active_users[] = $row;
-    }
-    $stmt_active_users->close();
-
-    $stmt_inactive_users = $conn->prepare("SELECT id, organization_name, email, role, status, created_at, rejection_reason, document_path, document_verified FROM users WHERE status = 'inactive' ORDER BY created_at DESC");
-    if (!$stmt_inactive_users) { die("Prepare failed for inactive users: " . $conn->error); }
-    if (!$stmt_inactive_users->execute()) { die("Execute failed for inactive users: " . $stmt_inactive_users->error); }
-    $result_inactive_users = $stmt_inactive_users->get_result();
-    if (!$result_inactive_users) { die("Get result failed for inactive users: " . $conn->error); }
-    while ($row = $result_inactive_users->fetch_assoc()) {
-        $inactive_users[] = $row;
-    }
-    $stmt_inactive_users->close();
-
-    $stmt_rejected_users = $conn->prepare("SELECT id, organization_name, email, role, status, created_at, rejection_reason, document_path, document_verified FROM users WHERE status = 'rejected' ORDER BY created_at DESC");
-    if (!$stmt_rejected_users) { die("Prepare failed for rejected users: " . $conn->error); }
-    if (!$stmt_rejected_users->execute()) { die("Execute failed for rejected users: " . $stmt_rejected_users->error); }
-    $result_rejected_users = $stmt_rejected_users->get_result();
-    if (!$result_rejected_users) { die("Get result failed for rejected users: " . $conn->error); }
-    while ($row = $result_rejected_users->fetch_assoc()) {
-        $rejected_users[] = $row;
-    }
-    $stmt_rejected_users->close();
+    $stmt_all_users->close();
 }
 
 if ($current_view === 'dashboard' || $current_view === 'donations') {
@@ -894,21 +882,21 @@ $conn->close();
         const mobileMenuOverlay = document.getElementById('mobile-menu-overlay');
         const closeMobileMenuButton = document.getElementById('close-mobile-menu');
 
-        if (mobileMenuButton) { // Defensive check
+        if (mobileMenuButton) {
             mobileMenuButton.addEventListener('click', () => {
                 mobileMenu.classList.add('mobile-menu-open');
                 mobileMenuOverlay.classList.remove('hidden');
             });
         }
 
-        if (closeMobileMenuButton) { // Defensive check
+        if (closeMobileMenuButton) {
             closeMobileMenuButton.addEventListener('click', () => {
                 mobileMenu.classList.remove('mobile-menu-open');
                 mobileMenuOverlay.classList.add('hidden');
             });
         }
         
-        if (mobileMenuOverlay) { // Defensive check
+        if (mobileMenuOverlay) {
             mobileMenuOverlay.addEventListener('click', (event) => {
                 if (event.target === mobileMenuOverlay) {
                     mobileMenu.classList.remove('mobile-menu-open');
@@ -930,19 +918,19 @@ $conn->close();
             button.addEventListener('click', () => {
                 const userId = button.dataset.userId;
                 const organizationName = button.dataset.organizationName;
-                const currentReason = button.dataset.currentReason || ''; // Populate if already has a reason
+                const currentReason = button.dataset.currentReason || '';
 
                 rejectUserIdInput.value = userId;
                 rejectUserOrgNameSpan.textContent = organizationName;
-                rejectUserReasonTextarea.value = currentReason; // Pre-fill with current reason if any
+                rejectUserReasonTextarea.value = currentReason;
 
-                if (rejectUserModal) { // Defensive check
+                if (rejectUserModal) {
                     rejectUserModal.style.display = 'flex';
                 }
             });
         });
 
-        if (closeRejectUserModalButton) { // Defensive check
+        if (closeRejectUserModalButton) {
             closeRejectUserModalButton.addEventListener('click', () => {
                 if (rejectUserModal) {
                     rejectUserModal.style.display = 'none';
@@ -950,7 +938,7 @@ $conn->close();
             });
         }
         
-        if (rejectUserModal) { // Defensive check
+        if (rejectUserModal) {
             window.addEventListener('click', (event) => {
                 if (event.target === rejectUserModal) {
                     rejectUserModal.style.display = 'none';
@@ -971,20 +959,19 @@ $conn->close();
             button.addEventListener('click', () => {
                 const donationId = button.dataset.donationId;
                 const donationDesc = button.dataset.donationDesc;
-                // Assuming you might add a data-current-reason for donations later too
-                // const currentReason = button.dataset.currentReason || '';
+                // const currentReason = button.dataset.currentReason || ''; // Uncomment if you add this data attribute
 
                 rejectDonationIdInput.value = donationId;
                 rejectDonationDescSpan.textContent = donationDesc;
                 // rejectDonationReasonTextarea.value = currentReason; 
 
-                if (rejectDonationModal) { // Defensive check
+                if (rejectDonationModal) {
                     rejectDonationModal.style.display = 'flex';
                 }
             });
         });
 
-        if (closeRejectDonationModalButton) { // Defensive check
+        if (closeRejectDonationModalButton) {
             closeRejectDonationModalButton.addEventListener('click', () => {
                 if (rejectDonationModal) {
                     rejectDonationModal.style.display = 'none';
@@ -992,7 +979,7 @@ $conn->close();
             });
         }
 
-        if (rejectDonationModal) { // Defensive check
+        if (rejectDonationModal) {
             window.addEventListener('click', (event) => {
                 if (event.target === rejectDonationModal) {
                     rejectDonationModal.style.display = 'none';
@@ -1002,6 +989,11 @@ $conn->close();
     </script>
 </body>
 </html>
+
+
+
+
+
 
 
 

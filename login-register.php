@@ -2,7 +2,8 @@
 // login-register.php
 session_start();
 
-include_once dirname(__FILE__) . '/db_connection.php'; // Include the database connection file
+// Include the database connection file
+include_once dirname(__FILE__) . '/db_connection.php';
 
 $message = ''; // To display messages to the user (e.g., success, error, pending approval)
 
@@ -12,7 +13,7 @@ if (isset($_SESSION['message'])) {
     unset($_SESSION['message']); // Clear the message after displaying it
 }
 
-// Special message for pending/rejected users trying to log in
+// Special message for pending/rejected/inactive users trying to log in
 // This block is for users who were previously logged in and then their status changed
 if (isset($_SESSION['user_status']) && ($_SESSION['user_status'] === 'pending' || $_SESSION['user_status'] === 'rejected' || $_SESSION['user_status'] === 'inactive')) {
     $conn = get_db_connection();
@@ -75,99 +76,143 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
     // Define upload directory relative to this script
     $upload_dir = 'uploads/documents/';
     if (!is_dir($upload_dir)) {
-        mkdir($upload_dir, 0777, true); // Create directory if it doesn't exist
+        // Attempt to create directory if it doesn't exist
+        if (!mkdir($upload_dir, 0777, true)) {
+            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Server error: Could not create upload directory. Check permissions.</div>';
+            error_log("SahaniShare Error: Could not create upload directory: " . $upload_dir);
+        } else {
+            error_log("SahaniShare Info: Upload directory created: " . $upload_dir);
+        }
     }
 
-    // IMPORTANT: Using 'organization_document' as per your original form's name attribute
-    if (isset($_FILES['organization_document']) && $_FILES['organization_document']['error'] === UPLOAD_ERR_OK) {
-        $file_tmp_name = $_FILES['organization_document']['tmp_name'];
-        $file_name = $_FILES['organization_document']['name'];
-        $file_size = $_FILES['organization_document']['size'];
-        $file_type = $_FILES['organization_document']['type'];
-        $file_ext = strtolower(pathinfo($file_name, PATHINFO_EXTENSION));
+    // Only attempt file upload if no prior error message
+    if (empty($message)) {
+        error_log("SahaniShare Debug: Starting file upload check for role: " . $role);
+        if (isset($_FILES['organization_document']) && $_FILES['organization_document']['error'] === UPLOAD_ERR_OK) {
+            $file_tmp_name = $_FILES['organization_document']['tmp_name'];
+            $file_name = $_FILES['organization_document']['name'];
+            $file_size = $_FILES['organization_document']['size'];
+            $file_type = $_FILES['organization_document']['type'];
+            $file_ext = strtolower(pathinfo($file_name, PATHINFO_EXTENSION));
 
-        // Basic validation
-        $allowed_extensions = ['pdf', 'jpg', 'jpeg', 'png', 'doc', 'docx']; // Added doc/docx for consistency
-        $max_file_size = 5 * 1024 * 1024; // 5MB
+            error_log("SahaniShare Debug: File details - Name: " . $file_name . ", Size: " . $file_size . ", Ext: " . $file_ext);
 
-        if (!in_array($file_ext, $allowed_extensions)) {
-            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid file type. Only PDF, JPG, JPEG, PNG, DOC, DOCX are allowed for documentation.</div>';
-        } elseif ($file_size > $max_file_size) {
-            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">File size exceeds 5MB limit.</div>';
-        } else {
-            // Generate a unique file name
-            $unique_file_name = uniqid('doc_', true) . '.' . $file_ext;
-            $destination_path = $upload_dir . $unique_file_name;
+            // Basic validation
+            $allowed_extensions = ['pdf', 'jpg', 'jpeg', 'png', 'doc', 'docx'];
+            $max_file_size = 5 * 1024 * 1024; // 5MB
 
-            if (move_uploaded_file($file_tmp_name, $destination_path)) {
-                $document_path = $destination_path;
-                $upload_success = true;
+            if (!in_array($file_ext, $allowed_extensions)) {
+                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid file type. Only PDF, JPG, JPEG, PNG, DOC, DOCX are allowed for documentation.</div>';
+                error_log("SahaniShare Upload Error: Invalid file type for " . $file_name);
+            } elseif ($file_size > $max_file_size) {
+                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">File size exceeds 5MB limit.</div>';
+                error_log("SahaniShare Upload Error: File size too large for " . $file_name);
             } else {
-                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error uploading document. Please try again.</div>';
+                // Generate a unique file name
+                $unique_file_name = uniqid('doc_', true) . '.' . $file_ext;
+                $destination_path = $upload_dir . $unique_file_name;
+
+                error_log("SahaniShare Debug: Attempting to move file to: " . $destination_path);
+                if (move_uploaded_file($file_tmp_name, $destination_path)) {
+                    $document_path = $destination_path;
+                    $upload_success = true;
+                    error_log("SahaniShare Upload Success: File " . $unique_file_name . " uploaded to " . $destination_path);
+                } else {
+                    $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error uploading document. Please try again. (Move failed)</div>';
+                    error_log("SahaniShare Upload Error: Failed to move uploaded file from " . $file_tmp_name . " to " . $destination_path . ". PHP error: " . error_get_last()['message']);
+                }
+            }
+        } elseif (isset($_FILES['organization_document']) && $_FILES['organization_document']['error'] !== UPLOAD_ERR_NO_FILE) {
+            // Specific file upload errors
+            $php_upload_errors = array(
+                UPLOAD_ERR_INI_SIZE   => 'The uploaded file exceeds the upload_max_filesize directive in php.ini.',
+                UPLOAD_ERR_FORM_SIZE  => 'The uploaded file exceeds the MAX_FILE_SIZE directive that was specified in the HTML form.',
+                UPLOAD_ERR_PARTIAL    => 'The uploaded file was only partially uploaded.',
+                UPLOAD_ERR_NO_TMP_DIR => 'Missing a temporary folder.',
+                UPLOAD_ERR_CANT_WRITE => 'Failed to write file to disk.',
+                UPLOAD_ERR_EXTENSION  => 'A PHP extension stopped the file upload.',
+            );
+            $error_code = $_FILES['organization_document']['error'];
+            $error_desc = isset($php_upload_errors[$error_code]) ? $php_upload_errors[$error_code] : 'Unknown upload error.';
+            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">File upload error: ' . htmlspecialchars($error_desc) . '</div>';
+            error_log("SahaniShare Upload Error: PHP upload error code " . $error_code . " - " . $error_desc);
+        } else {
+            // If no file was uploaded (UPLOAD_ERR_NO_FILE)
+            // For recipients, document is required. For donors, it's optional at registration.
+            if ($role === 'recipient') {
+                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Recipient registration requires document upload.</div>';
+                error_log("SahaniShare Registration Error: Recipient attempted registration without document.");
+            } else {
+                error_log("SahaniShare Debug: Donor registration, no document uploaded (optional).");
             }
         }
-    } else {
-        // If no file was uploaded, or there was an error
-        if ($_FILES['organization_document']['error'] !== UPLOAD_ERR_NO_FILE) {
-            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">File upload error: ' . $_FILES['organization_document']['error'] . '</div>';
-        }
-        // If it's a recipient and no file was uploaded, it's an error
-        if ($role === 'recipient' && $_FILES['organization_document']['error'] === UPLOAD_ERR_NO_FILE) {
-             $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Recipient registration requires document upload.</div>';
-        }
     }
 
 
-    // Proceed with registration only if there were no file upload errors (or if no file was submitted and it's a donor)
-    if (empty($message)) { // Only proceed if no upload errors
+    // Proceed with registration only if there were no file upload errors and other validations pass
+    if (empty($message)) { // Only proceed if no prior error message
         if (empty($organization_name) || empty($email) || empty($password) || empty($confirm_password) || empty($role)) {
             $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">All fields are required.</div>';
+            error_log("SahaniShare Validation Error: Missing required fields.");
         } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
             $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid email format.</div>';
+            error_log("SahaniShare Validation Error: Invalid email format for " . $email);
         } elseif (strlen($password) < 6) {
             $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Password must be at least 6 characters long.</div>';
+            error_log("SahaniShare Validation Error: Password too short.");
         } elseif ($password !== $confirm_password) {
             $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Passwords do not match.</div>';
+            error_log("SahaniShare Validation Error: Passwords do not match.");
         } else {
             $hashed_password = password_hash($password, PASSWORD_DEFAULT);
             $conn = get_db_connection();
 
             // Check if email already exists
             $stmt = $conn->prepare("SELECT id FROM users WHERE email = ?");
-            $stmt->bind_param("s", $email);
-            $stmt->execute();
-            $stmt->store_result();
-
-            if ($stmt->num_rows > 0) {
-                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Email already registered.</div>';
+            if (!$stmt) {
+                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database prepare error (email check): ' . htmlspecialchars($conn->error) . '</div>';
+                error_log("SahaniShare DB Error: Prepare failed for email check: " . $conn->error);
             } else {
-                // Insert new user into the database
-                // Status is 'pending' for recipients, 'active' for donors. document_verified is FALSE by default.
-                $status_for_db = ($role === 'recipient') ? 'pending' : 'active';
-                $document_verified_for_db = FALSE; // Always false on initial registration
+                $stmt->bind_param("s", $email);
+                $stmt->execute();
+                $stmt->store_result();
 
-                $stmt_insert = $conn->prepare("INSERT INTO users (organization_name, email, password_hash, role, status, document_path, document_verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
-                if (!$stmt_insert) {
-                    $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database prepare error: ' . htmlspecialchars($conn->error) . '</div>';
+                if ($stmt->num_rows > 0) {
+                    $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Email already registered.</div>';
+                    error_log("SahaniShare Registration Error: Email already registered: " . $email);
                 } else {
-                    $stmt_insert->bind_param("sssssis", $organization_name, $email, $hashed_password, $role, $status_for_db, $document_path, $document_verified_for_db);
+                    // Determine status and document_verified based on role
+                    $status_for_db = ($role === 'recipient') ? 'pending' : 'active';
+                    $document_verified_for_db = 0; // Always FALSE (0) on initial registration, requires admin verification
 
-                    if ($stmt_insert->execute()) {
-                        $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Registration successful! You can now log in.</div>';
-                        if ($role === 'recipient') {
-                            $_SESSION['message'] .= '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is pending admin approval. You will be notified once approved.</div>';
-                        }
-                        // Redirect to login page after successful registration
-                        header('Location: login-register.php');
-                        exit();
+                    // Insert new user into the database
+                    // Corrected bind_param: ssssssi (document_path is string, document_verified is int)
+                    $stmt_insert = $conn->prepare("INSERT INTO users (organization_name, email, password_hash, role, status, document_path, document_verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
+                    if (!$stmt_insert) {
+                        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database prepare error (user insert): ' . htmlspecialchars($conn->error) . '</div>';
+                        error_log("SahaniShare DB Error: Prepare failed for user insert: " . $conn->error);
                     } else {
-                        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error registering user: ' . htmlspecialchars($stmt_insert->error) . '</div>';
+                        // Bind parameters, including document_path and document_verified
+                        $stmt_insert->bind_param("ssssssi", $organization_name, $email, $hashed_password, $role, $status_for_db, $document_path, $document_verified_for_db);
+
+                        if ($stmt_insert->execute()) {
+                            $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Registration successful! You can now log in.</div>';
+                            if ($role === 'recipient') {
+                                $_SESSION['message'] .= '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is pending admin approval. You will be notified once approved.</div>';
+                            }
+                            error_log("SahaniShare Registration Success: User " . $email . " registered as " . $role . " with status " . $status_for_db . ". Document path: " . ($document_path ?? 'N/A') . ", Verified: " . $document_verified_for_db);
+                            header('Location: login-register.php'); // Redirect to self to show message and clear form data
+                            exit();
+                        } else {
+                            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error registering user: ' . htmlspecialchars($stmt_insert->error) . '</div>';
+                            error_log("SahaniShare DB Error: Execute failed for user insert: " . $stmt_insert->error);
+                        }
+                        $stmt_insert->close();
                     }
-                    $stmt_insert->close();
                 }
+                $stmt->close();
+                $conn->close();
             }
-            $stmt->close();
-            $conn->close();
         }
     }
 }
@@ -181,7 +226,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
         $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Email and password are required.</div>';
     } else {
         $conn = get_db_connection();
-        $stmt = $conn->prepare("SELECT id, organization_name, email, password_hash, role, status, rejection_reason FROM users WHERE email = ?"); // Ensure email is selected
+        $stmt = $conn->prepare("SELECT id, organization_name, email, password_hash, role, status, rejection_reason FROM users WHERE email = ?");
         $stmt->bind_param("s", $email);
         $stmt->execute();
         $stmt->store_result();
@@ -192,8 +237,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
             $_SESSION['user_id'] = $user_id_db;
             $_SESSION['organization_name'] = $organization_name_db;
             $_SESSION['user_role'] = $role_db;
-            $_SESSION['user_status'] = $status_db; // Store the status in session
-            $_SESSION['user_email'] = $email_db; // Store the email in session
+            $_SESSION['user_status'] = $status_db;
+            $_SESSION['user_email'] = $email_db;
 
             if ($status_db === 'active') {
                 if ($role_db === 'donor') {
@@ -207,8 +252,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
                     exit();
                 }
             } else {
-                // Account not active (pending, inactive, or rejected)
-                // Set a message and redirect back to login-register
                 if ($status_db === 'pending') {
                     $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is pending approval. Please wait for an administrator to review your registration.</div>';
                 } elseif ($status_db === 'inactive') {
@@ -217,7 +260,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
                     $rejection_info = !empty($rejection_reason_db) ? ' Reason: ' . htmlspecialchars($rejection_reason_db) : '';
                     $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Your account has been rejected.' . $rejection_info . ' Please contact support for more information.</div>';
                 }
-                header('Location: login-register.php'); // Redirect to self to show message
+                header('Location: login-register.php');
                 exit();
             }
         } else {
@@ -441,7 +484,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
                                 <option value="recipient">Food Recipient</option>
                             </select>
                         </div>
-                        <!-- Document Upload Field - Name changed to 'organization_document' as per your original code -->
+                        <!-- Document Upload Field -->
                         <div id="document-upload-section">
                             <label for="organization-document" class="block text-sm font-medium text-gray-700 mb-1">Organization Documentation (e.g., Business Permit, NGO Certificate)</label>
                             <input type="file" id="organization-document" name="organization_document" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png">
@@ -457,7 +500,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
     </div>
 
     <script>
-        console.log("login-register.php: JavaScript loaded."); // Debugging line
+        console.log("login-register.php: JavaScript loaded.");
 
         const loginTab = document.getElementById('login-tab');
         const registerTab = document.getElementById('register-tab');
@@ -465,51 +508,45 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
         const registerForm = document.getElementById('register-form');
         const alertMessage = document.getElementById('alert-message');
 
-        // Function to show/hide document upload based on role
         const roleSelect = document.getElementById('register-role');
         const documentUploadSection = document.getElementById('document-upload-section');
-        // IMPORTANT: Use 'organization-document' as the ID for the file input
         const organizationDocumentInput = document.getElementById('organization-document');
         const fileNameDisplay = document.getElementById('file-name-display');
 
         function toggleDocumentUpload() {
-            console.log("toggleDocumentUpload called. Role selected:", roleSelect.value); // Debugging line
+            console.log("toggleDocumentUpload called. Role selected:", roleSelect.value);
             if (roleSelect.value === 'recipient') {
                 documentUploadSection.classList.remove('hidden');
-                organizationDocumentInput.setAttribute('required', 'required'); // Set required attribute
-                console.log("Document upload shown and required."); // Debugging line
+                organizationDocumentInput.setAttribute('required', 'required');
+                console.log("Document upload shown and required.");
             } else {
                 documentUploadSection.classList.add('hidden');
-                organizationDocumentInput.removeAttribute('required'); // Remove required attribute
-                console.log("Document upload hidden and not required."); // Debugging line
+                organizationDocumentInput.removeAttribute('required');
+                console.log("Document upload hidden and not required.");
             }
         }
 
-        // Initial check on page load
-        toggleDocumentUpload();
+        toggleDocumentUpload(); // Initial call on page load
 
-        // Listen for changes
         if (roleSelect) {
             roleSelect.addEventListener('change', toggleDocumentUpload);
-            console.log("Event listener attached to roleSelect."); // Debugging line
+            console.log("Event listener attached to roleSelect.");
         }
 
-        // Display selected file name for 'organization-document'
         if (organizationDocumentInput) {
             organizationDocumentInput.addEventListener('change', function() {
                 if (this.files && this.files.length > 0) {
                     fileNameDisplay.textContent = `Selected: ${this.files[0].name}`;
-                    console.log("File selected:", this.files[0].name); // Debugging line
+                    console.log("File selected:", this.files[0].name);
                 } else {
                     fileNameDisplay.textContent = '';
-                    console.log("No file selected."); // Debugging line
+                    console.log("No file selected.");
                 }
             });
         }
 
-        // Tab switching logic (your original logic)
         function showTab(tabName) {
-            console.log("showTab called. Tab name:", tabName); // Debugging line
+            console.log("showTab called. Tab name:", tabName);
             if (tabName === 'login') {
                 loginTab.classList.add('active');
                 loginTab.classList.remove('inactive');
@@ -527,22 +564,19 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
             }
         }
 
-        // Event listeners for tab clicks (your original logic)
         if (loginTab) {
             loginTab.addEventListener('click', () => {
-                console.log("Login tab button clicked."); // Debugging line
+                console.log("Login tab button clicked.");
                 showTab('login');
             });
         }
         if (registerTab) {
             registerTab.addEventListener('click', () => {
-                console.log("Register tab button clicked."); // Debugging line
+                console.log("Register tab button clicked.");
                 showTab('register');
             });
         }
 
-        // Check for session message and display appropriate tab (your original logic, slightly refined)
-        // This will ensure the correct tab is active if redirected after a form submission
         if (alertMessage) {
             const messageContent = alertMessage.innerHTML;
             if (messageContent.includes("Registration successful") ||
@@ -561,12 +595,9 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
                 showTab('login');
             }
         } else {
-             // Default to login tab if no message
-            showTab('login');
+            showTab('login'); // Default to login tab if no message
         }
 
-
-        // Remove the alert message after a few seconds if it's not a persistent one (like pending approval)
         if (alertMessage && !alertMessage.innerHTML.includes("pending approval") && !alertMessage.innerHTML.includes("rejected") && !alertMessage.innerHTML.includes("inactive")) {
             setTimeout(() => {
                 alertMessage.style.transition = 'opacity 1s ease-out';
@@ -577,3 +608,5 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
     </script>
 </body>
 </html>
+
+
