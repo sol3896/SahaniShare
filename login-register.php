@@ -61,6 +61,22 @@ if (isset($_SESSION['user_id']) && isset($_SESSION['user_status']) && $_SESSION[
     }
 }
 
+$conn_fetch_types = get_db_connection(); // Use a separate connection for fetching types
+$ngo_types = [];
+$stmt_ngo_types = $conn_fetch_types->prepare("SELECT id, name FROM ngo_types ORDER BY name ASC");
+if ($stmt_ngo_types && $stmt_ngo_types->execute()) {
+    $result_ngo_types = $stmt_ngo_types->get_result();
+    while ($row = $result_ngo_types->fetch_assoc()) {
+        $ngo_types[] = $row;
+    }
+    $stmt_ngo_types->close();
+} else {
+    error_log("SahaniShare Error: Failed to fetch NGO types for login-register.php: " . $conn_fetch_types->error);
+    // Optionally add a user-facing message here if this failure is critical
+}
+$conn_fetch_types->close(); // Close this connection after fetching types
+
+
 // --- Registration Logic ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
     $organization_name = trim($_POST['organization_name']);
@@ -68,13 +84,22 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
     $password = $_POST['password'];
     $confirm_password = $_POST['confirm_password'];
     $role = $_POST['role']; // 'donor' or 'recipient'
+    $ngo_type_id = null; // Initialize to null
+
+    // If role is recipient, get ngo_type_id
+    if ($role === 'recipient') {
+        $ngo_type_id = filter_var($_POST['ngo_type_id'], FILTER_VALIDATE_INT);
+        if ($ngo_type_id === false || $ngo_type_id <= 0) {
+            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Please select a valid NGO type for recipient registration.</div>';
+        }
+    }
 
     // Document upload handling
     $document_path = null;
     $upload_success = false;
 
     // Define upload directory relative to this script
-    $upload_dir = 'uploads/documents/';
+    $upload_dir = 'uploads/documents/'; // This is for documents, as per your structure
     if (!is_dir($upload_dir)) {
         // Attempt to create directory if it doesn't exist
         if (!mkdir($upload_dir, 0777, true)) {
@@ -164,7 +189,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
             $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Passwords do not match.</div>';
             error_log("SahaniShare Validation Error: Passwords do not match.");
         } else {
-            $hashed_password = password_hash($password, PASSWORD_DEFAULT);
             $conn = get_db_connection();
 
             // Check if email already exists
@@ -185,22 +209,24 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
                     $status_for_db = ($role === 'recipient') ? 'pending' : 'active';
                     $document_verified_for_db = 0; // Always FALSE (0) on initial registration, requires admin verification
 
-                    // Insert new user into the database
-                    // Corrected bind_param: ssssssi (document_path is string, document_verified is int)
-                    $stmt_insert = $conn->prepare("INSERT INTO users (organization_name, email, password_hash, role, status, document_path, document_verified, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
+                    // Insert new user into the database, now including ngo_type_id
+                    // The 'i' for ngo_type_id means it's an integer. If it's null, it will be handled correctly by MySQL.
+                    $stmt_insert = $conn->prepare("INSERT INTO users (organization_name, email, password_hash, role, status, document_path, document_verified, ngo_type_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
                     if (!$stmt_insert) {
                         $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database prepare error (user insert): ' . htmlspecialchars($conn->error) . '</div>';
                         error_log("SahaniShare DB Error: Prepare failed for user insert: " . $conn->error);
                     } else {
-                        // Bind parameters, including document_path and document_verified
-                        $stmt_insert->bind_param("ssssssi", $organization_name, $email, $hashed_password, $role, $status_for_db, $document_path, $document_verified_for_db);
+                        // Bind parameters, including document_path, document_verified, and ngo_type_id
+                        // Use 's' for document_path (string) and 'i' for document_verified (int) and ngo_type_id (int)
+                        // For ngo_type_id, if it's null, bind_param will treat it as such if the column is nullable.
+                        $stmt_insert->bind_param("ssssssii", $organization_name, $email, $hashed_password, $role, $status_for_db, $document_path, $document_verified_for_db, $ngo_type_id);
 
                         if ($stmt_insert->execute()) {
                             $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Registration successful! You can now log in.</div>';
                             if ($role === 'recipient') {
                                 $_SESSION['message'] .= '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is pending admin approval. You will be notified once approved.</div>';
                             }
-                            error_log("SahaniShare Registration Success: User " . $email . " registered as " . $role . " with status " . $status_for_db . ". Document path: " . ($document_path ?? 'N/A') . ", Verified: " . $document_verified_for_db);
+                            error_log("SahaniShare Registration Success: User " . $email . " registered as " . $role . " with status " . $status_for_db . ". Document path: " . ($document_path ?? 'N/A') . ", Verified: " . $document_verified_for_db . ", NGO Type ID: " . ($ngo_type_id ?? 'N/A'));
                             header('Location: login-register.php'); // Redirect to self to show message and clear form data
                             exit();
                         } else {
@@ -211,7 +237,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
                     }
                 }
                 $stmt->close();
-                $conn->close();
+                // The main connection will be closed at the end of the script.
             }
         }
     }
@@ -267,8 +293,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
             $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid email or password.</div>';
         }
         $stmt->close();
-        $conn->close();
+        // The main connection will be closed at the end of the script.
     }
+}
+
+// Close the main connection if it's still open after all POST processing
+if (isset($conn) && $conn->ping()) {
+    $conn->close();
 }
 ?>
 
@@ -484,6 +515,19 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
                                 <option value="recipient">Food Recipient</option>
                             </select>
                         </div>
+                        <!-- NGO Type Selection (Conditional - for Recipients only) -->
+                        <div id="ngo-type-section" class="hidden">
+                            <label for="ngo_type_id" class="block text-sm font-medium text-gray-700 mb-1">Type of Organization</label>
+                            <select id="ngo_type_id" name="ngo_type_id">
+                                <option value="">Select NGO Type</option>
+                                <?php foreach ($ngo_types as $type): ?>
+                                    <option value="<?php echo htmlspecialchars($type['id']); ?>">
+                                        <?php echo htmlspecialchars($type['name']); ?>
+                                    </option>
+                                <?php endforeach; ?>
+                            </select>
+                            <p class="text-xs text-gray-500 mt-1">This helps us match you with relevant donations.</p>
+                        </div>
                         <!-- Document Upload Field -->
                         <div id="document-upload-section">
                             <label for="organization-document" class="block text-sm font-medium text-gray-700 mb-1">Organization Documentation (e.g., Business Permit, NGO Certificate)</label>
@@ -512,24 +556,32 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
         const documentUploadSection = document.getElementById('document-upload-section');
         const organizationDocumentInput = document.getElementById('organization-document');
         const fileNameDisplay = document.getElementById('file-name-display');
+        const ngoTypeSection = document.getElementById('ngo-type-section'); // New element
+        const ngoTypeSelect = document.getElementById('ngo_type_id'); // New element
 
-        function toggleDocumentUpload() {
-            console.log("toggleDocumentUpload called. Role selected:", roleSelect.value);
+        function toggleRecipientFields() {
+            console.log("toggleRecipientFields called. Role selected:", roleSelect.value);
             if (roleSelect.value === 'recipient') {
                 documentUploadSection.classList.remove('hidden');
                 organizationDocumentInput.setAttribute('required', 'required');
-                console.log("Document upload shown and required.");
+                ngoTypeSection.classList.remove('hidden'); // Show NGO type
+                ngoTypeSelect.setAttribute('required', 'required'); // Make NGO type required
+                console.log("Document upload and NGO type shown and required for recipient.");
             } else {
                 documentUploadSection.classList.add('hidden');
                 organizationDocumentInput.removeAttribute('required');
-                console.log("Document upload hidden and not required.");
+                ngoTypeSection.classList.add('hidden'); // Hide NGO type
+                ngoTypeSelect.removeAttribute('required'); // Make NGO type not required
+                // Reset NGO type selection if hidden
+                ngoTypeSelect.value = ''; 
+                console.log("Document upload and NGO type hidden and not required.");
             }
         }
 
-        toggleDocumentUpload(); // Initial call on page load
+        toggleRecipientFields(); // Initial call on page load
 
         if (roleSelect) {
-            roleSelect.addEventListener('change', toggleDocumentUpload);
+            roleSelect.addEventListener('change', toggleRecipientFields);
             console.log("Event listener attached to roleSelect.");
         }
 
@@ -561,6 +613,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
                 loginTab.classList.add('inactive');
                 registerForm.classList.remove('hidden');
                 loginForm.classList.add('hidden');
+                toggleRecipientFields(); // Ensure fields are correctly toggled when switching to register tab
             }
         }
 
@@ -588,11 +641,12 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
                 messageContent.includes("Email already registered") ||
                 messageContent.includes("Passwords do not match") ||
                 messageContent.includes("Password must be at least 6 characters long") ||
-                messageContent.includes("Recipient registration requires document upload")
+                messageContent.includes("Recipient registration requires document upload") ||
+                messageContent.includes("Please select a valid NGO type") // New check for NGO type validation
             ) {
                 showTab('register');
             } else {
-                showTab('login');
+                showTab('login'); // Default to login tab if no message
             }
         } else {
             showTab('login'); // Default to login tab if no message
@@ -608,5 +662,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
     </script>
 </body>
 </html>
+
 
 

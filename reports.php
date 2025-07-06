@@ -29,12 +29,12 @@ $total_donors = 0;
 $total_recipients = 0;
 
 $stmt_users_stats = $conn->prepare("SELECT COUNT(*) AS total, 
-                                           SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
-                                           SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
-                                           SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
-                                           SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END) AS inactive,
-                                           SUM(CASE WHEN role = 'donor' THEN 1 ELSE 0 END) AS donors,
-                                           SUM(CASE WHEN role = 'recipient' THEN 1 ELSE 0 END) AS recipients
+                                        SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active,
+                                        SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                                        SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+                                        SUM(CASE WHEN status = 'inactive' THEN 1 ELSE 0 END) AS inactive,
+                                        SUM(CASE WHEN role = 'donor' THEN 1 ELSE 0 END) AS donors,
+                                        SUM(CASE WHEN role = 'recipient' THEN 1 ELSE 0 END) AS recipients
                                     FROM users");
 if ($stmt_users_stats && $stmt_users_stats->execute()) {
     $result = $stmt_users_stats->get_result();
@@ -59,10 +59,10 @@ $fulfilled_donations = 0;
 $rejected_donations = 0;
 
 $stmt_donations_stats = $conn->prepare("SELECT COUNT(*) AS total,
-                                               SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
-                                               SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
-                                               SUM(CASE WHEN status = 'fulfilled' THEN 1 ELSE 0 END) AS fulfilled,
-                                               SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected
+                                            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                                            SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
+                                            SUM(CASE WHEN status = 'fulfilled' THEN 1 ELSE 0 END) AS fulfilled,
+                                            SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected
                                         FROM donations");
 if ($stmt_donations_stats && $stmt_donations_stats->execute()) {
     $result = $stmt_donations_stats->get_result();
@@ -86,11 +86,11 @@ $cancelled_requests = 0;
 
 // This query assumes a 'requests' table with a 'status' column (e.g., 'pending', 'accepted', 'completed', 'cancelled')
 $stmt_requests_stats = $conn->prepare("SELECT COUNT(*) AS total,
-                                              SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
-                                              SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) AS accepted,
-                                              SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
-                                              SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
-                                       FROM requests");
+                                            SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END) AS pending,
+                                            SUM(CASE WHEN status = 'accepted' THEN 1 ELSE 0 END) AS accepted,
+                                            SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed,
+                                            SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END) AS cancelled
+                                        FROM requests");
 if ($stmt_requests_stats && $stmt_requests_stats->execute()) {
     $result = $stmt_requests_stats->get_result();
     $row = $result->fetch_assoc();
@@ -292,6 +292,11 @@ $conn->close();
                         <span class="font-bold"><?php echo $total_recipients; ?></span>
                     </li>
                 </ul>
+                <div class="mt-6 text-center">
+                    <a href="download_user_report.php" class="btn-primary inline-flex items-center">
+                        <i class="fas fa-download mr-2"></i> Download User Report (CSV)
+                    </a>
+                </div>
             </div>
 
             <!-- Donation Statistics Card -->
@@ -319,6 +324,11 @@ $conn->close();
                         <span class="font-semibold text-red-600"><?php echo $rejected_donations; ?></span>
                     </li>
                 </ul>
+                <div class="mt-6 text-center">
+                    <a href="download_donation_report.php" class="btn-primary inline-flex items-center">
+                        <i class="fas fa-download mr-2"></i> Download Donation Report (CSV)
+                    </a>
+                </div>
             </div>
 
             <!-- Request Statistics Card -->
@@ -346,6 +356,11 @@ $conn->close();
                         <span class="font-semibold text-red-600"><?php echo $cancelled_requests; ?></span>
                     </li>
                 </ul>
+                <div class="mt-6 text-center">
+                    <a href="download_request_report.php" class="btn-primary inline-flex items-center">
+                        <i class="fas fa-download mr-2"></i> Download Request Report (CSV)
+                    </a>
+                </div>
             </div>
 
             <!-- You can add more detailed reports here, e.g., Top Donors, Donations by Category, etc. -->
@@ -385,6 +400,7 @@ $conn->close();
     </script>
 </body>
 </html>
+
 
 
 

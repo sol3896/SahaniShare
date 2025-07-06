@@ -13,63 +13,95 @@ if (!isset($_SESSION['user_id']) || $_SESSION['user_role'] !== 'donor') {
 
 $message = '';
 
+$conn = get_db_connection();
+
+// --- Fetch Donation Categories for the dropdown ---
+$donation_categories = [];
+$stmt_categories = $conn->prepare("SELECT id, name FROM donation_categories ORDER BY name ASC");
+if ($stmt_categories && $stmt_categories->execute()) {
+    $result_categories = $stmt_categories->get_result();
+    while ($row = $result_categories->fetch_assoc()) {
+        $donation_categories[] = $row;
+    }
+    $stmt_categories->close();
+} else {
+    error_log("SahaniShare Error: Failed to fetch donation categories for add-donation.php: " . $conn->error);
+    $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error loading donation categories. Please try again later.</div>';
+}
+
 // --- Handle Add Donation Form Submission ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_donation'])) {
     $donor_id = $_SESSION['user_id'];
     $description = trim($_POST['food_description']);
     $quantity = floatval($_POST['quantity']);
     $unit = trim($_POST['unit']);
-    $expiry_time = trim($_POST['expiry_time']); // Format: YYYY-MM-DDTHH:MM
-    $category = trim($_POST['category']);
+    $expiry_time = trim($_POST['expiry_time']); // Format:YYYY-MM-DDTHH:MM
+    $category_id = filter_var($_POST['category_id'], FILTER_VALIDATE_INT); // Get category ID
     $pickup_location = trim($_POST['location']);
     $photo_url = null; // Placeholder for photo URL
 
     // Basic validation
-    if (empty($description) || empty($quantity) || empty($unit) || empty($expiry_time) || empty($pickup_location)) {
-        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Please fill in all required fields.</div>';
-    } elseif ($quantity <= 0) {
-        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Quantity must be a positive number.</div>';
+    if (empty($description) || $quantity <= 0 || empty($unit) || empty($expiry_time) || empty($pickup_location)) {
+        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Please fill in all required fields (Description, Quantity, Unit, Expiry Time, Pickup Location). Quantity must be positive.</div>';
+    } elseif ($category_id === false || $category_id <= 0) {
+        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Please select a valid donation category.</div>';
     } else {
-        $conn = get_db_connection();
+        // Re-establish connection if it was closed or for a fresh POST
+        if (!isset($conn) || !$conn->ping()) {
+            $conn = get_db_connection();
+        }
 
-        // Convert expiry_time to proper DATETIME format for MySQL
-        // If your input is 'YYYY-MM-DDTHH:MM', MySQL should handle it directly.
-        // If it's a different format, you might need: date('Y-m-d H:i:s', strtotime($expiry_time))
+        // Handle photo upload
+        // CORRECTED: Upload directory now points directly to 'uploads/'
+        $upload_dir = 'uploads/'; 
+        if (!is_dir($upload_dir)) {
+            mkdir($upload_dir, 0777, true);
+        }
 
-        // Handle photo upload (Basic placeholder - A real application needs secure file storage)
         if (isset($_FILES['photo']) && $_FILES['photo']['error'] === UPLOAD_ERR_OK) {
             $file_tmp = $_FILES['photo']['tmp_name'];
-            $file_name = uniqid() . '_' . basename($_FILES['photo']['name']);
-            $upload_dir = 'uploads/'; // Create this directory in your htdocs/sahanishare folder
+            $file_name = $_FILES['photo']['name'];
+            $file_ext = strtolower(pathinfo($file_name, PATHINFO_EXTENSION));
+            $allowed_ext = ['jpg', 'jpeg', 'png', 'gif']; // Common image formats
 
-            if (!is_dir($upload_dir)) {
-                mkdir($upload_dir, 0777, true);
-            }
+            if (in_array($file_ext, $allowed_ext)) {
+                // Generate a unique file name to prevent conflicts
+                $new_file_name = uniqid('donation_img_', true) . '.' . $file_ext;
+                $dest_path = $upload_dir . $new_file_name;
 
-            if (move_uploaded_file($file_tmp, $upload_dir . $file_name)) {
-                $photo_url = $upload_dir . $file_name;
+                if (move_uploaded_file($file_tmp, $dest_path)) {
+                    $photo_url = $dest_path;
+                } else {
+                    $message .= '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Warning: Failed to upload photo. Donation submitted without photo.</div>';
+                }
             } else {
-                $message .= '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Warning: Failed to upload photo. Donation submitted without photo.</div>';
+                $message .= '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid photo file type. Allowed types: JPG, JPEG, PNG, GIF.</div>';
             }
         }
 
-        // Insert donation into database
-        $stmt = $conn->prepare("INSERT INTO donations (donor_id, description, quantity, unit, expiry_time, category, pickup_location, photo_url, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')");
+        // Insert donation into database, now including category_id
+        $stmt = $conn->prepare("INSERT INTO donations (donor_id, description, quantity, unit, expiry_time, category_id, pickup_location, photo_url, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')");
         // 's' for string, 'd' for double (float), 'i' for integer
-        $stmt->bind_param("isdsssss", $donor_id, $description, $quantity, $unit, $expiry_time, $category, $pickup_location, $photo_url);
-
-        if ($stmt->execute()) {
-            $message = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Donation submitted successfully! Awaiting approval.</div>';
-            // Clear form fields after successful submission (optional)
-            // header('Location: donor-dashboard.php?success=donation_added'); // Redirect to dashboard
-            // exit();
+        if (!$stmt) {
+            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database prepare error: ' . htmlspecialchars($conn->error) . '</div>';
         } else {
-            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error adding donation: ' . htmlspecialchars($stmt->error) . '</div>';
-        }
+            $stmt->bind_param("isdsssss", $donor_id, $description, $quantity, $unit, $expiry_time, $category_id, $pickup_location, $photo_url);
 
-        $stmt->close();
-        $conn->close();
+            if ($stmt->execute()) {
+                $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Donation submitted successfully! Awaiting approval.</div>';
+                header('Location: donor-dashboard.php'); // Redirect to dashboard
+                exit();
+            } else {
+                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error adding donation: ' . htmlspecialchars($stmt->error) . '</div>';
+            }
+            $stmt->close();
+        }
     }
+}
+
+// Close the main connection if it's still open
+if (isset($conn) && $conn->ping()) {
+    $conn->close();
 }
 ?>
 <!DOCTYPE html>
@@ -77,7 +109,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_donation'])) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SahaniShare - [Your Page Title Here]</title>
+    <title>SahaniShare - Add New Donation</title>
     <!-- Tailwind CSS CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
 
@@ -92,11 +124,44 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_donation'])) {
     <link rel="stylesheet" href="style.css">
     <!-- Inline style to apply Inter as base font (Montserrat is applied in style.css for headings) -->
     <style>
+        /* Define custom colors here to match login-register.php */
+        :root {
+            --primary-green: #A7D397; /* Your preferred lighter green */
+            --primary-green-dark: #8bbd78; /* A darker shade for hover states */
+            --neutral-dark: #333; /* From your original style.css, assuming it's a dark text color */
+            --accent-orange: #FF8C00; /* From your original style.css, assuming it's an accent color */
+        }
+
         body {
             font-family: 'Inter', sans-serif;
-            @apply bg-gray-100 text-gray-800;
+            background-color: #f3f4f6; /* bg-gray-100 */
+            color: #374151; /* text-gray-800 */
+            min-height: 100vh;
+            display: flex; /* Use flexbox for main layout */
+            flex-direction: column; /* Stack on mobile */
         }
-        /* No need for h1, h2, h3 styles here, they are in style.css now */
+        h1, h2, h3, h4, h5, h6 {
+            font-family: 'Montserrat', sans-serif;
+            color: var(--neutral-dark); /* Ensure headings use the defined neutral-dark */
+        }
+        .btn-primary {
+            background-color: var(--primary-green);
+            color: white;
+            @apply px-4 py-2 rounded-md hover:bg-primary-green-dark transition-colors;
+        }
+        .btn-secondary {
+            background-color: #6B7280; /* bg-gray-500 */
+            color: white;
+            @apply px-4 py-2 rounded-md hover:bg-gray-600 transition-colors;
+        }
+        /* Style for form inputs and textareas */
+        input[type="text"],
+        input[type="number"],
+        input[type="datetime-local"],
+        select,
+        textarea {
+            @apply w-full p-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-green focus:border-primary-green;
+        }
     </style>
 </head>
 <body class="min-h-screen flex flex-col">
@@ -113,8 +178,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_donation'])) {
         <nav class="hidden md:flex space-x-6">
             <a href="donor-dashboard.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Dashboard</a>
             <a href="add-donation.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Add Donation</a>
-            <a href="donor-dashboard.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">History</a>
-            <a href="donor-dashboard.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Profile</a>
+            <a href="donor-history.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">History</a>
+            <a href="#" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Profile</a>
             <a href="logout.php" class="text-neutral-dark hover:text-primary-green font-medium transition duration-200">Logout</a>
         </nav>
         <!-- Mobile Hamburger Icon -->
@@ -160,7 +225,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_donation'])) {
                             <label for="quantity" class="block text-sm font-medium text-gray-700 mb-1">Quantity</label>
                             <div class="flex">
                                 <input type="number" id="quantity" name="quantity" placeholder="e.g., 20" class="flex-grow" required min="1" step="0.01">
-                                <select name="unit" class="ml-2 p-3 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-primary-green">
+                                <select name="unit" class="ml-2 p-3 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-2 focus:ring-primary-green">
                                     <option value="kgs">kgs</option>
                                     <option value="liters">liters</option>
                                     <option value="pieces">pieces</option>
@@ -171,15 +236,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_donation'])) {
                             </div>
                         </div>
                         <div>
-                            <label for="category" class="block text-sm font-medium text-gray-700 mb-1">Category (Optional)</label>
-                            <select id="category" name="category">
+                            <label for="category_id" class="block text-sm font-medium text-gray-700 mb-1">Category</label>
+                            <select id="category_id" name="category_id" required>
                                 <option value="">Select Category</option>
-                                <option value="produce">Produce</option>
-                                <option value="baked-goods">Baked Goods</option>
-                                <option value="dairy">Dairy</option>
-                                <option value="prepared-meals">Prepared Meals</option>
-                                <option value="pantry-staples">Pantry Staples</option>
-                                <option value="other">Other</option>
+                                <?php foreach ($donation_categories as $cat): ?>
+                                    <option value="<?php echo htmlspecialchars($cat['id']); ?>">
+                                        <?php echo htmlspecialchars($cat['name']); ?>
+                                    </option>
+                                <?php endforeach; ?>
                             </select>
                         </div>
                     </div>
@@ -280,4 +344,6 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_donation'])) {
     </script>
 </body>
 </html>
+
+
 

@@ -37,12 +37,37 @@ if (isset($_SESSION['user_email'])) {
 // --- End Safely get user_email ---
 
 $message = ''; // To store success or error messages for the donor
-if (isset($_SESSION['message'])) {
+// Check for a specific account status message from admin actions (set in login-register.php or admin-panel.php)
+$account_status_message_key = 'user_status_message_' . $user_id;
+if (isset($_SESSION[$account_status_message_key])) {
+    $message = $_SESSION[$account_status_message_key];
+    unset($_SESSION[$account_status_message_key]); // Clear the message after displaying it
+} elseif (isset($_SESSION['message'])) { // General session messages (e.g., from add-donation.php)
     $message = $_SESSION['message'];
-    unset($_SESSION['message']); // Clear the message after displaying it
+    unset($_SESSION['message']);
 }
 
+
 $conn = get_db_connection(); // Re-establish connection for main data fetches
+
+// --- Handle Mark Notification as Read Action ---
+if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['mark_read'])) {
+    $notification_id = filter_var($_POST['notification_id'], FILTER_VALIDATE_INT);
+    if ($notification_id) {
+        $stmt_mark_read = $conn->prepare("UPDATE notifications SET is_read = TRUE WHERE id = ? AND user_id = ?");
+        if ($stmt_mark_read) {
+            $stmt_mark_read->bind_param("ii", $notification_id, $user_id);
+            $stmt_mark_read->execute();
+            $stmt_mark_read->close();
+        } else {
+            error_log("SahaniShare Error: Failed to prepare mark notification as read: " . $conn->error);
+        }
+    }
+    // Redirect to clear POST data and show updated notifications
+    header('Location: donor-dashboard.php');
+    exit();
+}
+
 
 // --- Fetch Donor's Document Status ---
 $document_verified = false;
@@ -62,7 +87,27 @@ $stmt_doc->fetch();
 $stmt_doc->close();
 
 
-// --- Fetch Recent Donations (Your Original Code) ---
+// --- Fetch Donor's Notifications ---
+$notifications = [];
+$unread_notifications_count = 0;
+$stmt_notifications = $conn->prepare("SELECT id, type, message, is_read, created_at FROM notifications WHERE user_id = ? ORDER BY created_at DESC LIMIT 10"); // Fetch latest 10 notifications
+if ($stmt_notifications) {
+    $stmt_notifications->bind_param("i", $user_id);
+    $stmt_notifications->execute();
+    $result_notifications = $stmt_notifications->get_result();
+    while ($row = $result_notifications->fetch_assoc()) {
+        $notifications[] = $row;
+        if (!$row['is_read']) {
+            $unread_notifications_count++;
+        }
+    }
+    $stmt_notifications->close();
+} else {
+    error_log("SahaniShare Error: Failed to fetch donor notifications: " . $conn->error);
+}
+
+
+// --- Fetch Recent Donations ---
 $recent_donations = [];
 $stmt = $conn->prepare("SELECT description, quantity, unit, created_at, status FROM donations WHERE donor_id = ? ORDER BY created_at DESC LIMIT 3");
 if (!$stmt) { die("Prepare failed for recent donations: " . $conn->error); }
@@ -74,7 +119,7 @@ while ($row = $result->fetch_assoc()) {
 }
 $stmt->close();
 
-// --- Fetch Recipient Feedback (Your Original Code) ---
+// --- Fetch Recipient Feedback ---
 $recipient_feedback = [];
 $stmt = $conn->prepare("
     SELECT f.comment, f.rating, u.organization_name as recipient_org_name
@@ -94,7 +139,7 @@ while ($row = $result->fetch_assoc()) {
 }
 $stmt->close();
 
-// --- Handle Document Resubmission (New Feature) ---
+// --- Handle Document Resubmission ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['upload_document'])) {
     // Re-establish connection as it might have been closed by previous operations or if this is a fresh POST
     if (!isset($conn) || !$conn->ping()) {
@@ -282,6 +327,49 @@ $conn->close();
         .text-accent-orange {
             color: var(--accent-orange);
         }
+
+        /* Notification specific styles */
+        .notification-item {
+            display: flex;
+            align-items: flex-start;
+            padding: 0.75rem;
+            border-radius: 0.375rem;
+            margin-bottom: 0.5rem;
+            background-color: #f9fafb; /* bg-gray-50 */
+            border: 1px solid #e5e7eb; /* border-gray-200 */
+        }
+        .notification-item.unread {
+            background-color: #fffbeb; /* bg-yellow-50 */
+            border-color: #fcd34d; /* border-yellow-300 */
+            font-weight: 600;
+        }
+        .notification-icon {
+            margin-right: 0.75rem;
+            font-size: 1.25rem;
+            flex-shrink: 0; /* Prevent icon from shrinking */
+        }
+        .notification-content {
+            flex-grow: 1;
+        }
+        .notification-time {
+            font-size: 0.75rem;
+            color: #6b7280; /* text-gray-500 */
+            margin-top: 0.25rem;
+        }
+        .mark-read-btn {
+            background: none;
+            border: none;
+            color: #9ca3af; /* text-gray-400 */
+            font-size: 0.875rem;
+            cursor: pointer;
+            padding: 0;
+            margin-left: 0.5rem;
+            transition: color 0.2s;
+            flex-shrink: 0; /* Prevent button from shrinking */
+        }
+        .mark-read-btn:hover {
+            color: #4b5563; /* text-gray-600 */
+        }
     </style>
 </head>
 <body class="min-h-screen flex flex-col md:flex-row">
@@ -329,7 +417,10 @@ $conn->close();
                 </li>
                 <li>
                     <a href="#" class="flex items-center p-3 rounded-lg hover:bg-primary-green-dark transition-colors">
-                        <i class="fas fa-bell mr-3"></i> Notifications <span class="ml-auto bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full">3</span>
+                        <i class="fas fa-bell mr-3"></i> Notifications
+                        <?php if ($unread_notifications_count > 0): ?>
+                            <span class="ml-auto bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full"><?php echo $unread_notifications_count; ?></span>
+                        <?php endif; ?>
                     </a>
                 </li>
                 <li>
@@ -376,50 +467,84 @@ $conn->close();
     <main class="main-content flex-grow p-4 md:p-8">
         <h1 class="text-4xl font-bold text-neutral-dark mb-8 text-center md:text-left">Welcome, <?php echo htmlspecialchars($organization_name); ?>!</h1>
 
-        <?php echo $message; // Display messages from session ?>
+        <?php echo $message; // Display messages from session, including account status messages ?>
 
         <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
 
-            <!-- Document Verification Status (New Feature) -->
+            <!-- Document Verification Status -->
             <div class="card col-span-1">
                 <h2 class="text-2xl font-semibold text-gray-800 mb-4">Document Verification</h2>
                 <p class="mb-2">
-                    Current Status: 
-                    <span class="status-tag <?php echo $document_verified ? 'status-verified' : 'status-unverified'; ?>">
-                        <?php echo $document_verified ? 'Verified' : 'Unverified'; ?>
+                    Current Status:
+                    <span class="status-tag <?php
+                        if ($document_verified) {
+                            echo 'status-verified';
+                        } elseif (!empty($document_path) && !$document_verified && empty($document_rejection_reason)) {
+                            echo 'status-pending-review'; // Document uploaded but not yet verified/rejected
+                        } else {
+                            echo 'status-unverified';
+                        }
+                    ?>">
+                        <?php
+                            if ($document_verified) {
+                                echo 'Verified';
+                            } elseif (!empty($document_path) && !$document_verified && empty($document_rejection_reason)) {
+                                echo 'Pending Review';
+                            } else {
+                                echo 'Unverified';
+                            }
+                        ?>
                     </span>
                 </p>
-                <?php if (!$document_verified && !empty($document_path)): ?>
+                <?php if (!empty($document_path)): ?>
                     <p class="text-sm text-gray-600 mb-2">
                         Your last submitted document: <a href="<?php echo htmlspecialchars($document_path); ?>" target="_blank" class="text-blue-500 hover:underline">View Document</a>
                     </p>
-                    <?php if (!empty($document_rejection_reason)): ?>
-                        <p class="text-red-600 text-sm mb-4">
-                            Reason for Unverification: <strong><?php echo htmlspecialchars($document_rejection_reason); ?></strong>
-                        </p>
-                    <?php endif; ?>
-                    <p class="text-sm text-gray-700 mb-4">Please re-submit your updated documentation for review.</p>
-                <?php elseif (!$document_verified && empty($document_path)): ?>
-                     <p class="text-sm text-gray-700 mb-4">No document has been submitted yet. Please upload your documentation for verification.</p>
+                <?php endif; ?>
+                <?php if (!empty($document_rejection_reason)): ?>
+                    <p class="text-red-600 text-sm mb-4">
+                        Reason for Unverification: <strong><?php echo htmlspecialchars($document_rejection_reason); ?></strong>
+                    </p>
                 <?php endif; ?>
 
-                <form action="donor-dashboard.php" method="POST" enctype="multipart/form-data" class="space-y-4">
-                    <div>
-                        <label for="document_file" class="block text-sm font-medium text-gray-700 mb-1">Upload Document (PDF, DOCX, JPG, PNG)</label>
-                        <input type="file" name="document_file" id="document_file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" class="mt-1 block w-full text-sm text-gray-500
-                            file:mr-4 file:py-2 file:px-4
-                            file:rounded-md file:border-0
-                            file:text-sm file:font-semibold
-                            file:bg-green-50 file:text-green-700
-                            hover:file:bg-green-100" required>
-                    </div>
-                    <button type="submit" name="upload_document" class="btn-primary-green">
-                        <i class="fas fa-upload mr-2"></i> Re-submit Document
-                    </button>
-                </form>
+                <?php if (!$document_verified): ?>
+                    <p class="text-sm text-gray-700 mb-4">
+                        <?php echo !empty($document_path) ? 'Please re-submit your updated documentation for review.' : 'No document has been submitted yet. Please upload your documentation for verification.'; ?>
+                    </p>
+                    <form action="donor-dashboard.php" method="POST" enctype="multipart/form-data" class="space-y-4">
+                        <div>
+                            <label for="document_file" class="block text-sm font-medium text-gray-700 mb-1">Upload Document (PDF, DOCX, JPG, PNG)</label>
+                            <input type="file" name="document_file" id="document_file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" class="mt-1 block w-full text-sm text-gray-500
+                                file:mr-4 file:py-2 file:px-4
+                                file:rounded-md file:border-0
+                                file:text-sm file:font-semibold
+                                file:bg-green-50 file:text-green-700
+                                hover:file:bg-green-100" required>
+                        </div>
+                        <button type="submit" name="upload_document" class="btn-primary-green">
+                            <i class="fas fa-upload mr-2"></i> Re-submit Document
+                        </button>
+                    </form>
+                <?php else: ?>
+                    <p class="text-sm text-gray-700 mb-4">Your document is verified. You can re-submit if needed.</p>
+                    <form action="donor-dashboard.php" method="POST" enctype="multipart/form-data" class="space-y-4">
+                        <div>
+                            <label for="document_file" class="block text-sm font-medium text-gray-700 mb-1">Upload Document (PDF, DOCX, JPG, PNG)</label>
+                            <input type="file" name="document_file" id="document_file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" class="mt-1 block w-full text-sm text-gray-500
+                                file:mr-4 file:py-2 file:px-4
+                                file:rounded-md file:border-0
+                                file:text-sm file:font-semibold
+                                file:bg-green-50 file:text-green-700
+                                hover:file:bg-green-100">
+                        </div>
+                        <button type="submit" name="upload_document" class="btn-primary-green">
+                            <i class="fas fa-upload mr-2"></i> Re-submit Document
+                        </button>
+                    </form>
+                <?php endif; ?>
             </div>
 
-            <!-- Quick Actions Card (Your Original Code) -->
+            <!-- Quick Actions Card -->
             <div class="card col-span-1">
                 <h3 class="text-xl font-semibold text-neutral-dark mb-4">Quick Actions</h3>
                 <a href="add-donation.php" class="btn-primary-green mb-4 block text-center">
@@ -432,57 +557,47 @@ $conn->close();
                 </div>
             </div>
 
-            <!-- Donation Notifications (New Feature - Placeholder for now) -->
+            <!-- Dynamic Notifications Card -->
             <div class="card col-span-1">
-                <h2 class="text-2xl font-semibold text-gray-800 mb-4">Donation Notifications</h2>
+                <h2 class="text-2xl font-semibold text-gray-800 mb-4">Notifications</h2>
                 <div class="space-y-3">
-                    <?php
-                    // Placeholder for fetching and displaying notifications
-                    // In the next step, we'll fetch from a 'donor_notifications' table
-                    $dummy_notifications = [
-                        ['type' => 'approved', 'message' => 'Your donation of "10 Kgs of Rice" has been approved!', 'time' => '2025-07-01 10:30'],
-                        ['type' => 'rejected', 'message' => 'Your donation of "Expired Canned Goods" was rejected. Reason: Expired items.', 'time' => '2025-06-28 15:00'],
-                        ['type' => 'approved', 'message' => 'Your donation of "Winter Clothes" has been approved!', 'time' => '2025-06-25 09:00'],
-                    ];
-
-                    if (empty($dummy_notifications)) {
-                        echo '<p class="text-gray-600">No new notifications.</p>';
-                    } else {
-                        foreach ($dummy_notifications as $notification) {
-                            $alert_class = '';
-                            $icon_class = '';
-                            switch ($notification['type']) {
-                                case 'approved':
-                                    $alert_class = 'bg-green-100 border-green-400 text-green-700';
-                                    $icon_class = 'fas fa-check-circle text-green-500';
-                                    break;
-                                case 'rejected':
-                                    $alert_class = 'bg-red-100 border-red-400 text-red-700';
-                                    $icon_class = 'fas fa-times-circle text-red-500';
-                                    break;
-                                default:
-                                    $alert_class = 'bg-blue-100 border-blue-400 text-blue-700';
-                                    $icon_class = 'fas fa-info-circle text-blue-500';
-                                    break;
-                            }
-                            echo '<div class="flex items-start p-3 rounded-md border ' . $alert_class . '">';
-                            echo '    <i class="' . $icon_class . ' mt-1 mr-3"></i>';
-                            echo '    <div>';
-                            echo '        <p class="font-medium">' . htmlspecialchars($notification['message']) . '</p>';
-                            echo '        <p class="text-xs text-gray-600">' . date('M d, Y H:i', strtotime($notification['time'])) . '</p>';
-                            echo '    </div>';
-                            echo '</div>';
-                        }
-                    }
-                    ?>
+                    <?php if (empty($notifications)): ?>
+                        <p class="text-gray-600 text-center">No new notifications.</p>
+                    <?php else: ?>
+                        <?php foreach ($notifications as $notification): ?>
+                            <div class="notification-item <?php echo $notification['is_read'] ? '' : 'unread'; ?>">
+                                <div class="notification-icon">
+                                    <?php
+                                        $icon_class = 'fas fa-info-circle text-blue-500'; // Default
+                                        if ($notification['type'] === 'donation_approved' || $notification['type'] === 'account_approved' || $notification['type'] === 'document_verified' || $notification['type'] === 'account_activated') {
+                                            $icon_class = 'fas fa-check-circle text-green-600';
+                                        } elseif ($notification['type'] === 'donation_rejected' || $notification['type'] === 'account_rejected' || $notification['type'] === 'document_unverified' || $notification['type'] === 'account_deactivated') {
+                                            $icon_class = 'fas fa-times-circle text-red-500';
+                                        }
+                                    ?>
+                                    <i class="<?php echo $icon_class; ?>"></i>
+                                </div>
+                                <div class="notification-content">
+                                    <p class="text-sm"><?php echo htmlspecialchars($notification['message']); ?></p>
+                                    <p class="notification-time"><?php echo date('M d, Y H:i', strtotime($notification['created_at'])); ?></p>
+                                </div>
+                                <?php if (!$notification['is_read']): ?>
+                                    <form method="POST" action="donor-dashboard.php" class="inline-block ml-auto">
+                                        <input type="hidden" name="notification_id" value="<?php echo $notification['id']; ?>">
+                                        <button type="submit" name="mark_read" class="mark-read-btn" title="Mark as Read">
+                                            <i class="fas fa-check"></i>
+                                        </button>
+                                    </form>
+                                <?php endif; ?>
+                            </div>
+                        <?php endforeach; ?>
+                    <?php endif; ?>
                 </div>
-                <button class="mt-4 btn-blue">
-                    <i class="fas fa-eye mr-2"></i> View All Notifications
-                </button>
+                <a href="#" class="text-primary-green hover:underline font-medium block mt-4 text-right">View All Notifications <i class="fas fa-arrow-right ml-1"></i></a>
             </div>
 
 
-            <!-- Recent Donations Card (Your Original Code) -->
+            <!-- Recent Donations Card -->
             <div class="card col-span-1 md:col-span-2" id="recent-donations">
                 <h3 class="text-xl font-semibold text-neutral-dark mb-4">Recent Donations</h3>
                 <div class="space-y-4">
@@ -512,7 +627,7 @@ $conn->close();
                 <a href="donor-history.php" class="text-primary-green hover:underline font-medium block mt-4 text-right">View All History <i class="fas fa-arrow-right ml-1"></i></a>
             </div>
 
-            <!-- Recipient Feedback Card (Your Original Code) -->
+            <!-- Recipient Feedback Card -->
             <div class="card col-span-1 md:col-span-2" id="recipient-feedback">
                 <h3 class="text-xl font-semibold text-neutral-dark mb-4">Recipient Feedback</h3>
                 <div class="space-y-4">
@@ -574,6 +689,3 @@ $conn->close();
     </script>
 </body>
 </html>
-
-
-
