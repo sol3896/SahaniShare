@@ -206,34 +206,42 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
                     error_log("SahaniShare Registration Error: Email already registered: " . $email);
                 } else {
                     // Determine status and document_verified based on role
-                    $status_for_db = ($role === 'recipient') ? 'pending' : 'active';
+                    // MODIFIED: Both donor and recipient now start as 'pending'
+                    $status_for_db = 'pending'; 
                     $document_verified_for_db = 0; // Always FALSE (0) on initial registration, requires admin verification
 
-                    // Insert new user into the database, now including ngo_type_id
-                    // The 'i' for ngo_type_id means it's an integer. If it's null, it will be handled correctly by MySQL.
-                    $stmt_insert = $conn->prepare("INSERT INTO users (organization_name, email, password_hash, role, status, document_path, document_verified, ngo_type_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
-                    if (!$stmt_insert) {
-                        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database prepare error (user insert): ' . htmlspecialchars($conn->error) . '</div>';
-                        error_log("SahaniShare DB Error: Prepare failed for user insert: " . $conn->error);
-                    } else {
-                        // Bind parameters, including document_path, document_verified, and ngo_type_id
-                        // Use 's' for document_path (string) and 'i' for document_verified (int) and ngo_type_id (int)
-                        // For ngo_type_id, if it's null, bind_param will treat it as such if the column is nullable.
-                        $stmt_insert->bind_param("ssssssii", $organization_name, $email, $hashed_password, $role, $status_for_db, $document_path, $document_verified_for_db, $ngo_type_id);
+                    // HASH THE PASSWORD
+                    $hashed_password = password_hash($password, PASSWORD_DEFAULT);
 
-                        if ($stmt_insert->execute()) {
-                            $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Registration successful! You can now log in.</div>';
-                            if ($role === 'recipient') {
-                                $_SESSION['message'] .= '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is pending admin approval. You will be notified once approved.</div>';
-                            }
-                            error_log("SahaniShare Registration Success: User " . $email . " registered as " . $role . " with status " . $status_for_db . ". Document path: " . ($document_path ?? 'N/A') . ", Verified: " . $document_verified_for_db . ", NGO Type ID: " . ($ngo_type_id ?? 'N/A'));
-                            header('Location: login-register.php'); // Redirect to self to show message and clear form data
-                            exit();
+                    // CRUCIAL CHECK: Ensure password hashing was successful before proceeding
+                    if ($hashed_password === false || empty($hashed_password)) {
+                        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error processing password. Please try again.</div>';
+                        error_log("SahaniShare Error: password_hash() failed or returned empty for email: " . $email);
+                        // Do NOT proceed with DB insert if hashing failed
+                    } else {
+                        // Insert new user into the database, now including ngo_type_id
+                        // The 'i' for ngo_type_id means it's an integer. If it's null, it will be handled correctly by MySQL.
+                        $stmt_insert = $conn->prepare("INSERT INTO users (organization_name, email, password_hash, role, status, document_path, document_verified, ngo_type_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)");
+                        if (!$stmt_insert) {
+                            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database prepare error (user insert): ' . htmlspecialchars($conn->error) . '</div>';
+                            error_log("SahaniShare DB Error: Prepare failed for user insert: " . $conn->error);
                         } else {
-                            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error registering user: ' . htmlspecialchars($stmt_insert->error) . '</div>';
-                            error_log("SahaniShare DB Error: Execute failed for user insert: " . $stmt_insert->error);
+                            // Bind parameters, including document_path, document_verified, and ngo_type_id
+                            // Use 's' for document_path (string) and 'i' for document_verified (int) and ngo_type_id (int)
+                            // For ngo_type_id, if it's null, bind_param will treat it as such if the column is nullable.
+                            $stmt_insert->bind_param("ssssssii", $organization_name, $email, $hashed_password, $role, $status_for_db, $document_path, $document_verified_for_db, $ngo_type_id);
+
+                            if ($stmt_insert->execute()) {
+                                $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">Registration successful! Your account is pending admin approval. You will be notified once approved.</div>';
+                                error_log("SahaniShare Registration Success: User " . $email . " registered as " . $role . " with status " . $status_for_db . ". Document path: " . ($document_path ?? 'N/A') . ", Verified: " . $document_verified_for_db . ", NGO Type ID: " . ($ngo_type_id ?? 'N/A'));
+                                header('Location: login-register.php'); // Redirect to self to show message and clear form data
+                                exit();
+                            } else {
+                                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error registering user: ' . htmlspecialchars($stmt_insert->error) . '</div>';
+                                error_log("SahaniShare DB Error: Execute failed for user insert: " . $stmt_insert->error);
+                            }
+                            $stmt_insert->close();
                         }
-                        $stmt_insert->close();
                     }
                 }
                 $stmt->close();
@@ -617,19 +625,6 @@ if (isset($conn) && $conn->ping()) {
             }
         }
 
-        if (loginTab) {
-            loginTab.addEventListener('click', () => {
-                console.log("Login tab button clicked.");
-                showTab('login');
-            });
-        }
-        if (registerTab) {
-            registerTab.addEventListener('click', () => {
-                console.log("Register tab button clicked.");
-                showTab('register');
-            });
-        }
-
         if (alertMessage) {
             const messageContent = alertMessage.innerHTML;
             if (messageContent.includes("Registration successful") ||
@@ -642,11 +637,12 @@ if (isset($conn) && $conn->ping()) {
                 messageContent.includes("Passwords do not match") ||
                 messageContent.includes("Password must be at least 6 characters long") ||
                 messageContent.includes("Recipient registration requires document upload") ||
-                messageContent.includes("Please select a valid NGO type") // New check for NGO type validation
+                messageContent.includes("Please select a valid NGO type") || // New check for NGO type validation
+                messageContent.includes("Error processing password") // New check for password hashing error
             ) {
                 showTab('register');
             } else {
-                showTab('login'); // Default to login tab if no message
+                showTab('login');
             }
         } else {
             showTab('login'); // Default to login tab if no message
@@ -662,6 +658,5 @@ if (isset($conn) && $conn->ping()) {
     </script>
 </body>
 </html>
-
 
 
