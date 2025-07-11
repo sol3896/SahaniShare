@@ -42,7 +42,7 @@ function insert_notification($conn, $user_id, $type, $message) {
     }
 }
 
-// --- Handle User Actions (Approve, Reject, Deactivate, Activate, Document Verify/Unverify) ---
+// --- Handle User Actions (Approve, Reject, Deactivate, Activate, Document Verify/Unverify, DELETE) ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['user_action'])) {
     $user_id_to_act_on = $_POST['user_id'];
     $action = $_POST['user_action'];
@@ -50,150 +50,191 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['user_action'])) {
 
     $stmt = null;
     try {
-        // Fetch user's details for notification and approval checks
-        $stmt_check_user_details = $conn->prepare("SELECT role, document_path, document_verified, organization_name FROM users WHERE id = ?");
-        if (!$stmt_check_user_details) {
-            throw new Exception("Prepare failed for user details check: " . $conn->error);
-        }
-        $stmt_check_user_details->bind_param("i", $user_id_to_act_on);
-        if (!$stmt_check_user_details->execute()) {
-            throw new Exception("Execute failed for user details check: " . $stmt_check_user_details->error);
-        }
-        $stmt_check_user_details->bind_result($user_role_to_check, $user_doc_path, $is_doc_verified, $user_org_name_for_notification);
-        $stmt_check_user_details->fetch();
-        $stmt_check_user_details->close();
+        // Fetch user's details for notification and approval checks (if not deleting)
+        $user_org_name_for_notification = null;
+        $user_role_to_check = null;
+        $user_doc_path = null;
+        $is_doc_verified = null;
 
-        if (!$user_org_name_for_notification) { // User not found or error fetching details
-            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error: User not found or details could not be retrieved.</div>';
-            // No exit here, let the page reload and display the error message
-        } else {
-            switch ($action) {
-                case 'approve':
-                    // Only admin can approve.
-                    if ($user_role === 'admin') {
-                        $can_approve = true;
-                        // For recipients, document verification is MANDATORY for approval.
-                        if ($user_role_to_check === 'recipient' && !$is_doc_verified) {
-                            $can_approve = false;
-                            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Cannot approve Recipient: Documentation is not yet verified. Please verify the document first.</div>';
-                        } 
-                        // For donors, if they uploaded a document, it should be verified before approval.
-                        elseif ($user_role_to_check === 'donor' && !empty($user_doc_path) && !$is_doc_verified) {
-                            $can_approve = false;
-                            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Cannot approve Donor: Document was uploaded but is not yet verified. Please verify the document first.</div>';
-                        }
-
-                        if ($can_approve) {
-                            $stmt = $conn->prepare("UPDATE users SET status = 'active', rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear rejection reason on approval
-                            if (!$stmt) {
-                                throw new Exception("Prepare failed: " . $conn->error);
-                            }
-                            $stmt->bind_param("i", $user_id_to_act_on);
-                            if (!$stmt->execute()) {
-                                $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to approve user: ' . htmlspecialchars($stmt->error) . '</div>';
-                            } else {
-                                $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User account approved successfully!</div>';
-                                // Insert account approval notification for the user
-                                insert_notification($conn, $user_id_to_act_on, 'account_approved', 'Your account for ' . htmlspecialchars($user_org_name_for_notification) . ' has been approved. Welcome to SahaniShare!');
-                            }
-                        }
-                    } else {
-                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can approve users.</div>';
-                    }
-                    break;
-                case 'reject':
-                     // Both admin and moderator can reject.
-                     if (empty($rejection_reason)) {
-                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Rejection reason cannot be empty.</div>';
-                     } else {
-                        $stmt = $conn->prepare("UPDATE users SET status = 'rejected', rejection_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-                        if (!$stmt) {
-                            throw new Exception("Prepare failed: " . $conn->error);
-                        }
-                        $stmt->bind_param("si", $rejection_reason, $user_id_to_act_on);
-                        if (!$stmt->execute()) {
-                            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to reject user: ' . htmlspecialchars($stmt->error) . '</div>';
-                        } else {
-                            $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">User account rejected. Reason: ' . htmlspecialchars($rejection_reason) . '</div>';
-                            // Insert account rejection notification for the user
-                            insert_notification($conn, $user_id_to_act_on, 'account_rejected', 'Your account for ' . htmlspecialchars($user_org_name_for_notification) . ' has been rejected. Reason: ' . htmlspecialchars($rejection_reason));
-                        }
-                     }
-                    break;
-                case 'deactivate':
-                    // Only admin can deactivate
-                    if ($user_role === 'admin') {
-                        $stmt = $conn->prepare("UPDATE users SET status = 'inactive', rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear reason
-                        if (!$stmt) {
-                            throw new Exception("Prepare failed: " . $conn->error);
-                        }
-                        $stmt->bind_param("i", $user_id_to_act_on);
-                        if (!$stmt->execute()) {
-                            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to deactivate user: ' . htmlspecialchars($stmt->error) . '</div>';
-                        } else {
-                            $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">User account deactivated.</div>';
-                            insert_notification($conn, $user_id_to_act_on, 'account_deactivated', 'Your account for ' . htmlspecialchars($user_org_name_for_notification) . ' has been deactivated. Please contact support if you believe this is an error.');
-                        }
-                    } else {
-                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can deactivate users.</div>';
-                    }
-                    break;
-                case 'activate':
-                    // Only admin can activate an inactive account
-                    if ($user_role === 'admin') {
-                        $stmt = $conn->prepare("UPDATE users SET status = 'active', rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear reason
-                        if (!$stmt) {
-                            throw new Exception("Prepare failed: " . $conn->error);
-                        }
-                        $stmt->bind_param("i", $user_id_to_act_on);
-                        if (!$stmt->execute()) {
-                            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to reactivate user: ' . htmlspecialchars($stmt->error) . '</div>';
-                        } else {
-                            $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User account reactivated.</div>';
-                            insert_notification($conn, $user_id_to_act_on, 'account_activated', 'Your account for ' . htmlspecialchars($user_org_name_for_notification) . ' has been reactivated. You can now log in.');
-                        }
-                    } else {
-                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can activate users.</div>';
-                    }
-                    break;
-                case 'verify_document':
-                    if ($user_role === 'admin') {
-                        $stmt = $conn->prepare("UPDATE users SET document_verified = TRUE, rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear rejection reason on verification
-                        if (!$stmt) {
-                            throw new Exception("Prepare failed: " . $conn->error);
-                        }
-                        $stmt->bind_param("i", $user_id_to_act_on);
-                        if (!$stmt->execute()) {
-                            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to verify document: ' . htmlspecialchars($stmt->error) . '</div>';
-                        } else {
-                            $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User document marked as verified.</div>';
-                            insert_notification($conn, $user_id_to_act_on, 'document_verified', 'Your organization document for ' . htmlspecialchars($user_org_name_for_notification) . ' has been verified.');
-                        }
-                    } else {
-                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can verify documents.</div>';
-                    }
-                    break;
-                case 'unverify_document':
-                    if ($user_role === 'admin') {
-                        $stmt = $conn->prepare("UPDATE users SET document_verified = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
-                        if (!$stmt) {
-                            throw new Exception("Prepare failed: " . $conn->error);
-                        }
-                        $stmt->bind_param("i", $user_id_to_act_on);
-                        if (!$stmt->execute()) {
-                            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to unverify document: ' . htmlspecialchars($stmt->error) . '</div>';
-                        } else {
-                            $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">User document marked as unverified.</div>';
-                            insert_notification($conn, $user_id_to_act_on, 'document_unverified', 'Your organization document for ' . htmlspecialchars($user_org_name_for_notification) . ' has been marked as unverified. Please review and re-upload if necessary.');
-                        }
-                    } else {
-                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can unverify documents.</div>';
-                    }
-                    break;
-                default:
-                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid user action.</div>';
-                    break;
+        if ($action !== 'delete') { // No need to fetch details if we are deleting the user
+            $stmt_check_user_details = $conn->prepare("SELECT role, document_path, document_verified, organization_name FROM users WHERE id = ?");
+            if (!$stmt_check_user_details) {
+                throw new Exception("Prepare failed for user details check: " . $conn->error);
             }
+            $stmt_check_user_details->bind_param("i", $user_id_to_act_on);
+            if (!$stmt_check_user_details->execute()) {
+                throw new Exception("Execute failed for user details check: " . $stmt_check_user_details->error);
+            }
+            $stmt_check_user_details->bind_result($user_role_to_check, $user_doc_path, $is_doc_verified, $user_org_name_for_notification);
+            $stmt_check_user_details->fetch();
+            $stmt_check_user_details->close();
+
+            if (!$user_org_name_for_notification) { // User not found or error fetching details
+                $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Error: User not found or details could not be retrieved.</div>';
+            }
+        }
+
+        switch ($action) {
+            case 'approve':
+                // Only admin can approve.
+                if ($user_role === 'admin') {
+                    $can_approve = true;
+                    // For recipients, document verification is MANDATORY for approval.
+                    if ($user_role_to_check === 'recipient' && !$is_doc_verified) {
+                        $can_approve = false;
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Cannot approve Recipient: Documentation is not yet verified. Please verify the document first.</div>';
+                    } 
+                    // For donors, if they uploaded a document, it should be verified before approval.
+                    elseif ($user_role_to_check === 'donor' && !empty($user_doc_path) && !$is_doc_verified) {
+                        $can_approve = false;
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Cannot approve Donor: Document was uploaded but is not yet verified. Please verify the document first.</div>';
+                    }
+
+                    if ($can_approve) {
+                        $stmt = $conn->prepare("UPDATE users SET status = 'active', rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear rejection reason on approval
+                        if (!$stmt) {
+                            throw new Exception("Prepare failed: " . $conn->error);
+                        }
+                        $stmt->bind_param("i", $user_id_to_act_on);
+                        if (!$stmt->execute()) {
+                            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to approve user: ' . htmlspecialchars($stmt->error) . '</div>';
+                        } else {
+                            $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User account approved successfully!</div>';
+                            // Insert account approval notification for the user
+                            insert_notification($conn, $user_id_to_act_on, 'account_approved', 'Your account for ' . htmlspecialchars($user_org_name_for_notification) . ' has been approved. Welcome to SahaniShare!');
+                        }
+                    }
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can approve users.</div>';
+                }
+                break;
+            case 'reject':
+                 // Both admin and moderator can reject.
+                 if (empty($rejection_reason)) {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Rejection reason cannot be empty.</div>';
+                 } else {
+                    $stmt = $conn->prepare("UPDATE users SET status = 'rejected', rejection_reason = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                    if (!$stmt) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $stmt->bind_param("si", $rejection_reason, $user_id_to_act_on);
+                    if (!$stmt->execute()) {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to reject user: ' . htmlspecialchars($stmt->error) . '</div>';
+                    } else {
+                        $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">User account rejected. Reason: ' . htmlspecialchars($rejection_reason) . '</div>';
+                        // Insert account rejection notification for the user
+                        insert_notification($conn, $user_id_to_act_on, 'account_rejected', 'Your account for ' . htmlspecialchars($user_org_name_for_notification) . ' has been rejected. Reason: ' . htmlspecialchars($rejection_reason));
+                    }
+                 }
+                break;
+            case 'deactivate':
+                // Only admin can deactivate
+                if ($user_role === 'admin') {
+                    $stmt = $conn->prepare("UPDATE users SET status = 'inactive', rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear reason
+                    if (!$stmt) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $stmt->bind_param("i", $user_id_to_act_on);
+                    if (!$stmt->execute()) {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to deactivate user: ' . htmlspecialchars($stmt->error) . '</div>';
+                    } else {
+                        $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">User account deactivated.</div>';
+                        insert_notification($conn, $user_id_to_act_on, 'account_deactivated', 'Your account for ' . htmlspecialchars($user_org_name_for_notification) . ' has been deactivated. Please contact support if you believe this is an error.');
+                    }
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can deactivate users.</div>';
+                }
+                break;
+            case 'activate':
+                // Only admin can activate an inactive account
+                if ($user_role === 'admin') {
+                    $stmt = $conn->prepare("UPDATE users SET status = 'active', rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear reason
+                    if (!$stmt) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $stmt->bind_param("i", $user_id_to_act_on);
+                    if (!$stmt->execute()) {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to reactivate user: ' . htmlspecialchars($stmt->error) . '</div>';
+                    } else {
+                        $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User account reactivated.</div>';
+                        insert_notification($conn, $user_id_to_act_on, 'account_activated', 'Your account for ' . htmlspecialchars($user_org_name_for_notification) . ' has been reactivated. You can now log in.');
+                    }
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can activate users.</div>';
+                }
+                break;
+            case 'verify_document':
+                if ($user_role === 'admin') {
+                    $stmt = $conn->prepare("UPDATE users SET document_verified = TRUE, rejection_reason = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?"); // Clear rejection reason on verification
+                    if (!$stmt) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $stmt->bind_param("i", $user_id_to_act_on);
+                    if (!$stmt->execute()) {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to verify document: ' . htmlspecialchars($stmt->error) . '</div>';
+                    } else {
+                        $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User document marked as verified.</div>';
+                        insert_notification($conn, $user_id_to_act_on, 'document_verified', 'Your organization document for ' . htmlspecialchars($user_org_name_for_notification) . ' has been verified.');
+                    }
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can verify documents.</div>';
+                }
+                break;
+            case 'unverify_document':
+                if ($user_role === 'admin') {
+                    $stmt = $conn->prepare("UPDATE users SET document_verified = FALSE, updated_at = CURRENT_TIMESTAMP WHERE id = ?");
+                    if (!$stmt) {
+                        throw new Exception("Prepare failed: " . $conn->error);
+                    }
+                    $stmt->bind_param("i", $user_id_to_act_on);
+                    if (!$stmt->execute()) {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to unverify document: ' . htmlspecialchars($stmt->error) . '</div>';
+                    } else {
+                        $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">User document marked as unverified.</div>';
+                        insert_notification($conn, $user_id_to_act_on, 'document_unverified', 'Your organization document for ' . htmlspecialchars($user_org_name_for_notification) . ' has been marked as unverified. Please review and re-upload if necessary.');
+                    }
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can unverify documents.</div>';
+                }
+                break;
+            case 'delete':
+                if ($user_role === 'admin') {
+                    // Prevent admin from deleting themselves
+                    if ($user_id_to_act_on == $_SESSION['user_id']) {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">You cannot delete your own admin account.</div>';
+                        break;
+                    }
+
+                    // Fetch organization name for message before deletion
+                    $stmt_get_org_name = $conn->prepare("SELECT organization_name FROM users WHERE id = ?");
+                    if ($stmt_get_org_name) {
+                        $stmt_get_org_name->bind_param("i", $user_id_to_act_on);
+                        $stmt_get_org_name->execute();
+                        $stmt_get_org_name->bind_result($deleted_org_name);
+                        $stmt_get_org_name->fetch();
+                        $stmt_get_org_name->close();
+                    } else {
+                        $deleted_org_name = "a user"; // Fallback
+                    }
+
+                    $stmt = $conn->prepare("DELETE FROM users WHERE id = ?");
+                    if (!$stmt) {
+                        throw new Exception("Prepare failed for user deletion: " . $conn->error);
+                    }
+                    $stmt->bind_param("i", $user_id_to_act_on);
+                    if (!$stmt->execute()) {
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Failed to delete user: ' . htmlspecialchars($stmt->error) . '</div>';
+                    } else {
+                        $_SESSION['message'] = '<div class="bg-green-100 border border-green-400 text-green-700 px-4 py-3 rounded-md mb-4" role="alert">User account for ' . htmlspecialchars($deleted_org_name) . ' deleted successfully!</div>';
+                        // No notification for deleted user, as their account is gone.
+                    }
+                } else {
+                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Permission denied: Only administrators can delete users.</div>';
+                }
+                break;
+            default:
+                $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid user action.</div>';
+                break;
         }
     } catch (Exception $e) {
         $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error during user action: ' . htmlspecialchars($e->getMessage()) . '</div>';
@@ -281,6 +322,8 @@ $rejected_users = [];
 $pending_donations = [];
 $approved_donations = [];
 
+error_log("SahaniShare Debug: Starting user data fetch for view: " . $current_view);
+
 // Fetch ALL users with their document details AND NGO Type
 $stmt_all_users = $conn->prepare("
     SELECT 
@@ -303,16 +346,17 @@ $stmt_all_users = $conn->prepare("
 ");
 if (!$stmt_all_users) { 
     error_log("SahaniShare DB Error: Prepare failed for all users: " . $conn->error);
-    // Optionally set a user-facing error message here if this is critical
+    // Set a user-facing error message if this critical query fails
+    $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not prepare user data query.</div>';
 } else {
     if (!$stmt_all_users->execute()) { 
         error_log("SahaniShare DB Error: Execute failed for all users: " . $stmt_all_users->error);
-        // Optionally set a user-facing error message here if this is critical
+        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not execute user data query.</div>';
     } else {
         $result_all_users = $stmt_all_users->get_result();
         if (!$result_all_users) { 
             error_log("SahaniShare DB Error: Get result failed for all users: " . $conn->error);
-            // Optionally set a user-facing error message here if this is critical
+            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not retrieve user data results.</div>';
         } else {
             while ($row = $result_all_users->fetch_assoc()) {
                 // Populate the specific user arrays for display
@@ -321,6 +365,7 @@ if (!$stmt_all_users) {
                 elseif ($row['status'] === 'inactive') $inactive_users[] = $row;
                 elseif ($row['status'] === 'rejected') $rejected_users[] = $row;
             }
+            error_log("SahaniShare Debug: User data fetched. Pending: " . count($pending_users) . ", Active: " . count($active_users));
         }
     }
     $stmt_all_users->close();
@@ -351,16 +396,16 @@ $stmt_donations = $conn->prepare("
 ");
 if (!$stmt_donations) { 
     error_log("SahaniShare DB Error: Prepare failed for donations: " . $conn->error);
-    // Optionally set a user-facing error message here if this is critical
+    // Optionally set a user-facing message here if this is critical
 } else {
     if (!$stmt_donations->execute()) { 
         error_log("SahaniShare DB Error: Execute failed for donations: " . $stmt_donations->error);
-        // Optionally set a user-facing error message here if this is critical
+        // Optionally set a user-facing message here if this is critical
     } else {
         $result_donations = $stmt_donations->get_result();
         if (!$result_donations) { 
             error_log("SahaniShare DB Error: Get result failed for donations: " . $conn->error);
-            // Optionally set a user-facing error message here if this is critical
+            // Optionally set a user-facing message here if this is critical
         } else {
             while ($row = $result_donations->fetch_assoc()) {
                 if ($row['status'] === 'pending') $pending_donations[] = $row;
@@ -718,17 +763,22 @@ if ($conn) {
                                                             Re-reject
                                                         </button>
                                                     <?php endif; ?>
+                                                    <!-- DELETE BUTTON -->
+                                                    <button type="button" class="bg-gray-600 text-white px-3 py-1 rounded-md hover:bg-gray-700 transition-colors text-xs delete-user-btn"
+                                                        data-user-id="<?php echo $user['id']; ?>"
+                                                        data-organization-name="<?php echo htmlspecialchars($user['organization_name']); ?>">
+                                                        Delete
+                                                    </button>
                                                 <?php endif; ?>
                                             </div>
                                         </td>
                                     </tr>
                                 <?php endforeach; ?>
-                            </tbody>
-                        </table>
-                    </div>
-                <?php endif; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
             </div>
-
         <?php elseif ($current_view === 'users'): // This is the "Manage Users" view ?>
             <div class="card p-6">
                 <h3 class="text-xl font-semibold text-neutral-dark mb-4">All Users</h3>
@@ -872,99 +922,11 @@ if ($conn) {
                                                             Re-reject
                                                         </button>
                                                     <?php endif; ?>
-                                                <?php endif; ?>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                <?php endforeach; ?>
-                            <?php endif; ?>
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-        <?php elseif ($current_view === 'donations'): ?>
-            <div class="card p-6">
-                <h3 class="text-xl font-semibold text-neutral-dark mb-4">All Donations</h3>
-                <div class="mb-6 flex flex-wrap gap-4">
-                    <a href="admin-panel.php?view=donations&filter=all" class="px-4 py-2 rounded-md <?php echo (!isset($_GET['filter']) || $_GET['filter'] === 'all' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">All</a>
-                    <a href="admin-panel.php?view=donations&filter=pending" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'pending' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Pending (<?php echo count((array)$pending_donations); ?>)</a>
-                    <a href="admin-panel.php?view=donations&filter=approved" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'approved' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Approved (<?php echo count((array)$approved_donations); ?>)</a>
-                </div>
-
-                <div class="overflow-x-auto">
-                    <table class="min-w-full bg-white rounded-lg shadow overflow-hidden">
-                        <thead class="bg-gray-200">
-                            <tr>
-                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">ID</th>
-                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Description</th>
-                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Category</th> <!-- New column for Category -->
-                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Quantity</th>
-                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Donor</th>
-                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Expiry Time</th>
-                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Status</th>
-                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Reason / Created On</th>
-                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            <?php
-                            $filter = $_GET['filter'] ?? 'all';
-                            $donations_to_display = [];
-                            if ($filter === 'all') {
-                                $donations_to_display = array_merge($pending_donations, $approved_donations);
-                                usort($donations_to_display, function($a, $b) {
-                                    return strtotime($b['created_at']) - strtotime($a['created_at']);
-                                });
-                            } elseif ($filter === 'pending') {
-                                $donations_to_display = $pending_donations;
-                            } elseif ($filter === 'approved') {
-                                $donations_to_display = $approved_donations;
-                            }
-                            ?>
-                            <?php if (empty($donations_to_display)): ?>
-                                <tr><td colspan="9" class="py-4 text-center text-gray-600">No donations found for this filter.</td></tr>
-                            <?php else: ?>
-                                <?php foreach ($donations_to_display as $donation): ?>
-                                    <tr class="border-b last:border-b-0 hover:bg-gray-50">
-                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['id']); ?></td>
-                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['description']); ?></td>
-                                        <td class="py-3 px-4 text-sm text-gray-800">
-                                            <?php echo htmlspecialchars($donation['category_name'] ?? 'N/A'); ?> <!-- Display Category Name -->
-                                        </td>
-                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['quantity']) . ' ' . htmlspecialchars($donation['unit']); ?></td>
-                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['donor_org']); ?></td>
-                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo date('Y-m-d H:i', strtotime($donation['expiry_time'])); ?></td>
-                                        <td class="py-3 px-4 text-sm">
-                                            <span class="status-tag <?php
-                                                $status_class = '';
-                                                switch ($donation['status']) {
-                                                    case 'pending': $status_class = 'status-pending'; break;
-                                                    case 'approved': $status_class = 'status-approved'; break;
-                                                    case 'rejected': $status_class = 'status-rejected'; break;
-                                                    case 'fulfilled': $status_class = 'status-fulfilled'; break;
-                                                }
-                                                echo $status_class;
-                                            ?>"><?php echo htmlspecialchars(ucfirst($donation['status'])); ?></span>
-                                        </td>
-                                        <td class="py-3 px-4 text-sm text-gray-800">
-                                            <?php if ($donation['status'] === 'rejected' && !empty($donation['rejection_reason'])): ?>
-                                                <span class="font-semibold">Reason:</span> <?php echo htmlspecialchars($donation['rejection_reason']); ?>
-                                            <?php else: ?>
-                                                <?php echo date('Y-m-d', strtotime($donation['created_at'])); ?>
-                                            <?php endif; ?>
-                                        </td>
-                                        <td class="py-3 px-4 text-sm">
-                                            <div class="flex flex-wrap gap-2">
-                                                <?php if ($donation['status'] === 'pending'): ?>
-                                                    <form method="POST" action="admin-panel.php?view=donations" class="inline-block">
-                                                        <input type="hidden" name="donation_id" value="<?php echo $donation['id']; ?>">
-                                                        <button type="submit" name="donation_action" value="approve_donation" class="bg-primary-green text-white px-3 py-1 rounded-md hover:bg-primary-green-dark transition-colors text-xs">Approve</button>
-                                                    </form>
-                                                    <!-- Reject button to open modal -->
-                                                    <button type="button" class="bg-red-500 text-white px-3 py-1 rounded-md hover:bg-red-600 transition-colors text-xs reject-donation-btn"
-                                                        data-donation-id="<?php echo $donation['id']; ?>"
-                                                        data-donation-desc="<?php echo htmlspecialchars($donation['description']); ?>">
-                                                        Reject
+                                                    <!-- DELETE BUTTON -->
+                                                    <button type="button" class="bg-gray-600 text-white px-3 py-1 rounded-md hover:bg-gray-700 transition-colors text-xs delete-user-btn"
+                                                        data-user-id="<?php echo $user['id']; ?>"
+                                                        data-organization-name="<?php echo htmlspecialchars($user['organization_name']); ?>">
+                                                        Delete
                                                     </button>
                                                 <?php endif; ?>
                                             </div>
@@ -993,6 +955,22 @@ if ($conn) {
                     <textarea id="rejection-reason" name="rejection_reason" rows="4" class="w-full border border-gray-300 rounded-md shadow-sm p-2 focus:ring-primary-green focus:border-primary-green" placeholder="e.g., Incomplete documentation, Failed verification check, Not a valid organization type" required></textarea>
                 </div>
                 <button type="submit" class="btn-primary bg-red-500 hover:bg-red-600">Confirm Rejection</button>
+            </form>
+        </div>
+    </div>
+
+    <!-- Delete User Modal -->
+    <div id="delete-user-modal" class="modal">
+        <div class="modal-content card">
+            <span class="close-button" id="close-delete-user-modal">&times;</span>
+            <h3 class="text-xl font-semibold text-neutral-dark mb-4 text-red-600">Confirm User Deletion</h3>
+            <p class="mb-4 text-gray-700">Are you sure you want to permanently delete the account for: <span id="delete-user-org-name" class="font-bold text-red-700"></span>?</p>
+            <p class="text-sm text-red-500 mb-6">This action cannot be undone. All associated data (donations, requests, etc.) will also be removed if your database is configured with cascading deletes.</p>
+            <form method="POST" action="admin-panel.php?view=users" class="space-y-4">
+                <input type="hidden" name="user_id" id="delete-user-id">
+                <input type="hidden" name="user_action" value="delete">
+                <button type="submit" class="btn-primary bg-red-600 hover:bg-red-700">Yes, Delete This User</button>
+                <button type="button" id="cancel-delete-user" class="btn-primary bg-gray-400 hover:bg-gray-500">Cancel</button>
             </form>
         </div>
     </div>
@@ -1082,6 +1060,53 @@ if ($conn) {
             window.addEventListener('click', (event) => {
                 if (event.target === rejectUserModal) {
                     rejectUserModal.style.display = 'none';
+                }
+            });
+        }
+
+
+        // Delete User Modal Logic
+        const deleteUserModal = document.getElementById('delete-user-modal');
+        const closeDeleteUserModalButton = document.getElementById('close-delete-user-modal');
+        const cancelDeleteUserButton = document.getElementById('cancel-delete-user');
+        const deleteUserButtons = document.querySelectorAll('.delete-user-btn');
+        const deleteUserIdInput = document.getElementById('delete-user-id');
+        const deleteUserOrgNameSpan = document.getElementById('delete-user-org-name');
+
+        deleteUserButtons.forEach(button => {
+            button.addEventListener('click', () => {
+                const userId = button.dataset.userId;
+                const organizationName = button.dataset.organizationName;
+
+                deleteUserIdInput.value = userId;
+                deleteUserOrgNameSpan.textContent = organizationName;
+
+                if (deleteUserModal) {
+                    deleteUserModal.style.display = 'flex';
+                }
+            });
+        });
+
+        if (closeDeleteUserModalButton) {
+            closeDeleteUserModalButton.addEventListener('click', () => {
+                if (deleteUserModal) {
+                    deleteUserModal.style.display = 'none';
+                }
+            });
+        }
+
+        if (cancelDeleteUserButton) {
+            cancelDeleteUserButton.addEventListener('click', () => {
+                if (deleteUserModal) {
+                    deleteUserModal.style.display = 'none';
+                }
+            });
+        }
+        
+        if (deleteUserModal) {
+            window.addEventListener('click', (event) => {
+                if (event.target === deleteUserModal) {
+                    deleteUserModal.style.display = 'none';
                 }
             });
         }

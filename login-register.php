@@ -79,18 +79,20 @@ $conn_fetch_types->close(); // Close this connection after fetching types
 
 // --- Registration Logic ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
-    $organization_name = trim($_POST['organization_name']);
-    $email = trim($_POST['email']);
-    $password = $_POST['password'];
-    $confirm_password = $_POST['confirm_password'];
-    $role = $_POST['role']; // 'donor' or 'recipient'
+    error_log("SahaniShare Debug: Registration POST received.");
+    $organization_name = trim($_POST['organization_name'] ?? '');
+    $email = trim($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
+    $confirm_password = $_POST['confirm_password'] ?? '';
+    $role = $_POST['role'] ?? ''; // 'donor' or 'recipient'
     $ngo_type_id = null; // Initialize to null
 
     // If role is recipient, get ngo_type_id
     if ($role === 'recipient') {
-        $ngo_type_id = filter_var($_POST['ngo_type_id'], FILTER_VALIDATE_INT);
+        $ngo_type_id = filter_var($_POST['ngo_type_id'] ?? '', FILTER_VALIDATE_INT);
         if ($ngo_type_id === false || $ngo_type_id <= 0) {
             $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Please select a valid NGO type for recipient registration.</div>';
+            error_log("SahaniShare Validation Error: Invalid NGO type ID for recipient.");
         }
     }
 
@@ -253,54 +255,63 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['register'])) {
 
 // --- Login Logic ---
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['login'])) {
-    $email = trim($_POST['email']);
-    $password = $_POST['password'];
+    error_log("SahaniShare Debug: Login POST received.");
+    $email = trim($_POST['email'] ?? '');
+    $password = $_POST['password'] ?? '';
 
     if (empty($email) || empty($password)) {
         $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Email and password are required.</div>';
+        error_log("SahaniShare Validation Error: Login - Email or password empty.");
     } else {
         $conn = get_db_connection();
         $stmt = $conn->prepare("SELECT id, organization_name, email, password_hash, role, status, rejection_reason FROM users WHERE email = ?");
-        $stmt->bind_param("s", $email);
-        $stmt->execute();
-        $stmt->store_result();
-        $stmt->bind_result($user_id_db, $organization_name_db, $email_db, $password_hash_db, $role_db, $status_db, $rejection_reason_db);
-        $stmt->fetch();
+        if (!$stmt) {
+            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database prepare error (login): ' . htmlspecialchars($conn->error) . '</div>';
+            error_log("SahaniShare DB Error: Login - Prepare failed: " . $conn->error);
+        } else {
+            $stmt->bind_param("s", $email);
+            $stmt->execute();
+            $stmt->store_result();
+            $stmt->bind_result($user_id_db, $organization_name_db, $email_db, $password_hash_db, $role_db, $status_db, $rejection_reason_db);
+            $stmt->fetch();
 
-        if ($stmt->num_rows > 0 && password_verify($password, $password_hash_db)) {
-            $_SESSION['user_id'] = $user_id_db;
-            $_SESSION['organization_name'] = $organization_name_db;
-            $_SESSION['user_role'] = $role_db;
-            $_SESSION['user_status'] = $status_db;
-            $_SESSION['user_email'] = $email_db;
+            if ($stmt->num_rows > 0 && password_verify($password, $password_hash_db)) {
+                $_SESSION['user_id'] = $user_id_db;
+                $_SESSION['organization_name'] = $organization_name_db;
+                $_SESSION['user_role'] = $role_db;
+                $_SESSION['user_status'] = $status_db;
+                $_SESSION['user_email'] = $email_db;
+                error_log("SahaniShare Login Success: User " . $email . " logged in with status " . $status_db);
 
-            if ($status_db === 'active') {
-                if ($role_db === 'donor') {
-                    header('Location: donor-dashboard.php');
-                    exit();
-                } elseif ($role_db === 'recipient') {
-                    header('Location: recipient-dashboard.php');
-                    exit();
-                } elseif ($role_db === 'admin' || $role_db === 'moderator') {
-                    header('Location: admin-panel.php');
+                if ($status_db === 'active') {
+                    if ($role_db === 'donor') {
+                        header('Location: donor-dashboard.php');
+                        exit();
+                    } elseif ($role_db === 'recipient') {
+                        header('Location: recipient-dashboard.php');
+                        exit();
+                    } elseif ($role_db === 'admin' || $role_db === 'moderator') {
+                        header('Location: admin-panel.php');
+                        exit();
+                    }
+                } else {
+                    if ($status_db === 'pending') {
+                        $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is pending approval. Please wait for an administrator to review your registration.</div>';
+                    } elseif ($status_db === 'inactive') {
+                        $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is currently inactive. Please contact support.</div>';
+                    } elseif ($status_db === 'rejected') {
+                        $rejection_info = !empty($rejection_reason_db) ? ' Reason: ' . htmlspecialchars($rejection_reason_db) : '';
+                        $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Your account has been rejected.' . $rejection_info . ' Please contact support for more information.</div>';
+                    }
+                    header('Location: login-register.php');
                     exit();
                 }
             } else {
-                if ($status_db === 'pending') {
-                    $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is pending approval. Please wait for an administrator to review your registration.</div>';
-                } elseif ($status_db === 'inactive') {
-                    $_SESSION['message'] = '<div class="bg-yellow-100 border border-yellow-400 text-yellow-700 px-4 py-3 rounded-md mb-4" role="alert">Your account is currently inactive. Please contact support.</div>';
-                } elseif ($status_db === 'rejected') {
-                    $rejection_info = !empty($rejection_reason_db) ? ' Reason: ' . htmlspecialchars($rejection_reason_db) : '';
-                    $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Your account has been rejected.' . $rejection_info . ' Please contact support for more information.</div>';
-                }
-                header('Location: login-register.php');
-                exit();
+                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid email or password.</div>';
+                error_log("SahaniShare Login Error: Invalid credentials for email: " . $email);
             }
-        } else {
-            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Invalid email or password.</div>';
+            $stmt->close();
         }
-        $stmt->close();
         // The main connection will be closed at the end of the script.
     }
 }
@@ -625,8 +636,25 @@ if (isset($conn) && $conn->ping()) {
             }
         }
 
+        // Event listeners for tab buttons
+        if (loginTab) {
+            loginTab.addEventListener('click', () => {
+                console.log("Login tab button clicked.");
+                showTab('login');
+            });
+        }
+        if (registerTab) {
+            registerTab.addEventListener('click', () => {
+                console.log("Register tab button clicked.");
+                showTab('register');
+            });
+        }
+
+
+        // Logic to show the correct tab based on messages after a POST request
         if (alertMessage) {
             const messageContent = alertMessage.innerHTML;
+            console.log("Alert message content:", messageContent); // Log the message content
             if (messageContent.includes("Registration successful") ||
                 messageContent.includes("Error registering user") ||
                 messageContent.includes("File upload error") ||
@@ -637,17 +665,18 @@ if (isset($conn) && $conn->ping()) {
                 messageContent.includes("Passwords do not match") ||
                 messageContent.includes("Password must be at least 6 characters long") ||
                 messageContent.includes("Recipient registration requires document upload") ||
-                messageContent.includes("Please select a valid NGO type") || // New check for NGO type validation
-                messageContent.includes("Error processing password") // New check for password hashing error
+                messageContent.includes("Please select a valid NGO type") ||
+                messageContent.includes("Error processing password")
             ) {
                 showTab('register');
             } else {
-                showTab('login');
+                showTab('login'); // Default to login tab if no specific registration message
             }
         } else {
-            showTab('login'); // Default to login tab if no message
+            showTab('login'); // Default to login tab if no message at all
         }
 
+        // Auto-hide alert messages after a delay, unless they are specific status messages
         if (alertMessage && !alertMessage.innerHTML.includes("pending approval") && !alertMessage.innerHTML.includes("rejected") && !alertMessage.innerHTML.includes("inactive")) {
             setTimeout(() => {
                 alertMessage.style.transition = 'opacity 1s ease-out';
