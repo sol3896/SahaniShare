@@ -30,6 +30,12 @@ $conn = get_db_connection(); // Establish database connection once at the beginn
 
 // Function to insert a notification into the database
 function insert_notification($conn, $user_id, $type, $message) {
+    // Ensure connection is valid before preparing statement
+    if (!$conn || $conn->connect_error) {
+        error_log("SahaniShare Notification Error: Database connection not available for notification insert.");
+        return;
+    }
+
     $stmt = $conn->prepare("INSERT INTO notifications (user_id, type, message) VALUES (?, ?, ?)");
     if ($stmt) {
         $stmt->bind_param("iss", $user_id, $type, $message);
@@ -42,7 +48,7 @@ function insert_notification($conn, $user_id, $type, $message) {
     }
 }
 
-// --- Handle User Actions (Approve, Reject, Deactivate, Activate, Document Verify/Unverify, DELETE) ---
+// --- Handle User Actions (Approve, Reject, Deactivate, Activate, Document Verify/Unverify, DELETE) --
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['user_action'])) {
     $user_id_to_act_on = $_POST['user_id'];
     $action = $_POST['user_action'];
@@ -50,6 +56,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['user_action'])) {
 
     $stmt = null;
     try {
+        // Ensure connection is valid before performing user actions
+        if (!$conn || $conn->connect_error) {
+            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database connection error. Cannot perform user action.</div>';
+            header('Location: admin-panel.php?view=' . $current_view);
+            exit();
+        }
+
         // Fetch user's details for notification and approval checks (if not deleting)
         $user_org_name_for_notification = null;
         $user_role_to_check = null;
@@ -254,13 +267,22 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['donation_action'])) {
 
     $stmt = null;
     try {
+        // Ensure connection is valid before performing donation actions
+        if (!$conn || $conn->connect_error) {
+            $_SESSION['message'] = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database connection error. Cannot perform donation action.</div>';
+            header('Location: admin-panel.php?view=' . $current_view);
+            exit();
+        }
+
         // First, get the donor_id and donation description for the notification
         $stmt_get_donation_details = $conn->prepare("SELECT donor_id, description FROM donations WHERE id = ?");
         if (!$stmt_get_donation_details) {
             throw new Exception("Prepare failed for donation details: " . $conn->error);
         }
         $stmt_get_donation_details->bind_param("i", $donation_id_to_act_on);
-        $stmt_get_donation_details->execute();
+        if (!$stmt_get_donation_details->execute()) {
+            throw new Exception("Execute failed for donation details: " . $stmt_get_donation_details->error);
+        }
         $stmt_get_donation_details->bind_result($donor_id_for_notification, $donation_description_for_notification);
         $stmt_get_donation_details->fetch();
         $stmt_get_donation_details->close();
@@ -322,103 +344,112 @@ $rejected_users = [];
 $pending_donations = [];
 $approved_donations = [];
 
-error_log("SahaniShare Debug: Starting user data fetch for view: " . $current_view);
-
-// Fetch ALL users with their document details AND NGO Type
-$stmt_all_users = $conn->prepare("
-    SELECT 
-        u.id, 
-        u.organization_name, 
-        u.email, 
-        u.role, 
-        u.status, 
-        u.created_at, 
-        u.rejection_reason, 
-        u.document_path, 
-        u.document_verified,
-        nt.name AS ngo_type_name -- Fetch NGO type name
-    FROM 
-        users u
-    LEFT JOIN 
-        ngo_types nt ON u.ngo_type_id = nt.id -- Join with ngo_types table
-    ORDER BY 
-        u.created_at ASC
-");
-if (!$stmt_all_users) { 
-    error_log("SahaniShare DB Error: Prepare failed for all users: " . $conn->error);
-    // Set a user-facing error message if this critical query fails
-    $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not prepare user data query.</div>';
+// Ensure connection is valid before fetching data
+if (!$conn || $conn->connect_error) {
+    $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Critical Database Error: Could not connect to the database to fetch data. Please check your `db_connection.php`.</div>';
+    error_log("SahaniShare Critical Error: Database connection failed at data fetch phase: " . ($conn ? $conn->connect_error : 'No connection object'));
 } else {
-    if (!$stmt_all_users->execute()) { 
-        error_log("SahaniShare DB Error: Execute failed for all users: " . $stmt_all_users->error);
-        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not execute user data query.</div>';
-    } else {
-        $result_all_users = $stmt_all_users->get_result();
-        if (!$result_all_users) { 
-            error_log("SahaniShare DB Error: Get result failed for all users: " . $conn->error);
-            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not retrieve user data results.</div>';
-        } else {
-            while ($row = $result_all_users->fetch_assoc()) {
-                // Populate the specific user arrays for display
-                if ($row['status'] === 'pending') $pending_users[] = $row;
-                elseif ($row['status'] === 'active') $active_users[] = $row;
-                elseif ($row['status'] === 'inactive') $inactive_users[] = $row;
-                elseif ($row['status'] === 'rejected') $rejected_users[] = $row;
-            }
-            error_log("SahaniShare Debug: User data fetched. Pending: " . count($pending_users) . ", Active: " . count($active_users));
-        }
-    }
-    $stmt_all_users->close();
-}
+    error_log("SahaniShare Debug: Starting user data fetch for view: " . $current_view);
 
-
-// Fetch donations by status - NOW INCLUDING 'd.status' AND 'd.rejection_reason' AND category_name
-$stmt_donations = $conn->prepare("
-    SELECT 
-        d.id, 
-        d.description, 
-        d.quantity, 
-        d.unit, 
-        d.expiry_time, 
-        d.status, 
-        d.rejection_reason, 
-        u.organization_name as donor_org, 
-        d.created_at,
-        dc.name AS category_name -- Fetch category name
-    FROM 
-        donations d 
-    JOIN 
-        users u ON d.donor_id = u.id 
-    LEFT JOIN
-        donation_categories dc ON d.category_id = dc.id -- Join with donation_categories table
-    ORDER BY 
-        d.created_at ASC
-");
-if (!$stmt_donations) { 
-    error_log("SahaniShare DB Error: Prepare failed for donations: " . $conn->error);
-    // Optionally set a user-facing message here if this is critical
-} else {
-    if (!$stmt_donations->execute()) { 
-        error_log("SahaniShare DB Error: Execute failed for donations: " . $stmt_donations->error);
-        // Optionally set a user-facing message here if this is critical
+    // Fetch ALL users with their document details AND NGO Type
+    $stmt_all_users = $conn->prepare("
+        SELECT 
+            u.id, 
+            u.organization_name, 
+            u.email, 
+            u.role, 
+            u.status, 
+            u.created_at, 
+            u.rejection_reason, 
+            u.document_path, 
+            u.document_verified,
+            nt.name AS ngo_type_name -- Fetch NGO type name
+        FROM 
+            users u
+        LEFT JOIN 
+            ngo_types nt ON u.ngo_type_id = nt.id -- Join with ngo_types table
+        ORDER BY 
+            u.created_at ASC
+    ");
+    if (!$stmt_all_users) { 
+        // This is the most likely culprit if 'Manage Users' is blank.
+        error_log("SahaniShare DB Error: Prepare failed for all users (check 'users' or 'ngo_types' table/columns): " . $conn->error);
+        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not prepare user data query. This might mean the `users` or `ngo_types` table is missing or has an issue. Error: ' . htmlspecialchars($conn->error) . '</div>';
     } else {
-        $result_donations = $stmt_donations->get_result();
-        if (!$result_donations) { 
-            error_log("SahaniShare DB Error: Get result failed for donations: " . $conn->error);
-            // Optionally set a user-facing message here if this is critical
+        if (!$stmt_all_users->execute()) { 
+            error_log("SahaniShare DB Error: Execute failed for all users: " . $stmt_all_users->error);
+            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not execute user data query. Error: ' . htmlspecialchars($stmt_all_users->error) . '</div>';
         } else {
-            while ($row = $result_donations->fetch_assoc()) {
-                if ($row['status'] === 'pending') $pending_donations[] = $row;
-                elseif ($row['status'] === 'approved') $approved_donations[] = $row;
+            $result_all_users = $stmt_all_users->get_result();
+            if (!$result_all_users) { 
+                error_log("SahaniShare DB Error: Get result failed for all users: " . $conn->error);
+                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not retrieve user data results. Error: ' . htmlspecialchars($conn->error) . '</div>';
+            } else {
+                while ($row = $result_all_users->fetch_assoc()) {
+                    // Populate the specific user arrays for display
+                    if ($row['status'] === 'pending') $pending_users[] = $row;
+                    elseif ($row['status'] === 'active') $active_users[] = $row;
+                    elseif ($row['status'] === 'inactive') $inactive_users[] = $row;
+                    elseif ($row['status'] === 'rejected') $rejected_users[] = $row;
+                }
+                error_log("SahaniShare Debug: User data fetched. Pending: " . count($pending_users) . ", Active: " . count($active_users));
             }
         }
+        $stmt_all_users->close();
     }
-    $stmt_donations->close();
+
+
+    error_log("SahaniShare Debug: Starting donation data fetch.");
+    // Fetch donations by status - NOW INCLUDING 'd.status' AND 'd.rejection_reason' AND category_name
+    $stmt_donations = $conn->prepare("
+        SELECT 
+            d.id, 
+            d.description, 
+            d.quantity, 
+            d.unit, 
+            d.expiry_time, 
+            d.status, 
+            d.rejection_reason, 
+            u.organization_name as donor_org, 
+            d.created_at,
+            dc.name AS category_name -- Fetch category name
+        FROM 
+            donations d 
+        JOIN 
+            users u ON d.donor_id = u.id 
+        LEFT JOIN
+            donation_categories dc ON d.category_id = dc.id -- Join with donation_categories table
+        ORDER BY 
+            d.created_at ASC
+    ");
+    if (!$stmt_donations) { 
+        error_log("SahaniShare DB Error: Prepare failed for donations (check 'donations' or 'donation_categories' table/columns): " . $conn->error);
+        // Set a user-facing error message if this critical query fails
+        $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not prepare donation data query. This might mean the `donations` or `donation_categories` table is missing or has an issue. Error: ' . htmlspecialchars($conn->error) . '</div>';
+    } else {
+        if (!$stmt_donations->execute()) { 
+            error_log("SahaniShare DB Error: Execute failed for donations: " . $stmt_donations->error);
+            $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not execute donation data query. Error: ' . htmlspecialchars($stmt_donations->error) . '</div>';
+        } else {
+            $result_donations = $stmt_donations->get_result();
+            if (!$result_donations) { 
+                error_log("SahaniShare DB Error: Get result failed for donations: " . $conn->error);
+                $message = '<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-md mb-4" role="alert">Database error: Could not retrieve donation data results. Error: ' . htmlspecialchars($conn->error) . '</div>';
+            } else {
+                while ($row = $result_donations->fetch_assoc()) {
+                    if ($row['status'] === 'pending') $pending_donations[] = $row;
+                    elseif ($row['status'] === 'approved') $approved_donations[] = $row;
+                }
+                error_log("SahaniShare Debug: Donation data fetched. Pending: " . count($pending_donations) . ", Approved: " . count($approved_donations));
+            }
+        }
+        $stmt_donations->close();
+    }
 }
 
 
 // Close the main connection before rendering HTML
-if ($conn) {
+if (isset($conn) && $conn->ping()) { // Added isset check for $conn
     $conn->close();
 }
 
@@ -811,8 +842,12 @@ if ($conn) {
                             $users_to_display = [];
                             if ($filter === 'all') {
                                 $users_to_display = array_merge($pending_users, $active_users, $inactive_users, $rejected_users);
+                                // Sort by created_at in descending order
                                 usort($users_to_display, function($a, $b) {
-                                    return strtotime($b['created_at']) - strtotime($a['created_at']);
+                                    // Handle cases where 'created_at' might be missing or not a valid date string
+                                    $timeA = isset($a['created_at']) ? strtotime($a['created_at']) : 0;
+                                    $timeB = isset($b['created_at']) ? strtotime($b['created_at']) : 0;
+                                    return $timeB - $timeA;
                                 });
                             } elseif ($filter === 'pending') {
                                 $users_to_display = $pending_users;
@@ -927,6 +962,103 @@ if ($conn) {
                                                         data-user-id="<?php echo $user['id']; ?>"
                                                         data-organization-name="<?php echo htmlspecialchars($user['organization_name']); ?>">
                                                         Delete
+                                                    </button>
+                                                <?php endif; ?>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            <?php endif; ?>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        <?php elseif ($current_view === 'donations'): // This is the "Manage Donations" view ?>
+            <div class="card p-6">
+                <h3 class="text-xl font-semibold text-neutral-dark mb-4">All Donations</h3>
+                <div class="mb-6 flex flex-wrap gap-4">
+                    <a href="admin-panel.php?view=donations&filter=all" class="px-4 py-2 rounded-md <?php echo (!isset($_GET['filter']) || $_GET['filter'] === 'all' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">All</a>
+                    <a href="admin-panel.php?view=donations&filter=pending" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'pending' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Pending (<?php echo count((array)$pending_donations); ?>)</a>
+                    <a href="admin-panel.php?view=donations&filter=approved" class="px-4 py-2 rounded-md <?php echo (isset($_GET['filter']) && $_GET['filter'] === 'approved' ? 'bg-primary-green text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'); ?>">Approved (<?php echo count((array)$approved_donations); ?>)</a>
+                </div>
+
+                <div class="overflow-x-auto">
+                    <table class="min-w-full bg-white rounded-lg shadow overflow-hidden">
+                        <thead class="bg-gray-200">
+                            <tr>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">ID</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Description</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Category</th> <!-- New column for Category -->
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Quantity</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Donor</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Expiry Time</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Status</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Reason / Created On</th>
+                                <th class="py-3 px-4 text-left text-sm font-medium text-gray-700">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <?php
+                            $filter = $_GET['filter'] ?? 'all';
+                            $donations_to_display = [];
+                            if ($filter === 'all') {
+                                $donations_to_display = array_merge($pending_donations, $approved_donations);
+                                usort($donations_to_display, function($a, $b) {
+                                    // Handle cases where 'created_at' might be missing or not a valid date string
+                                    $timeA = isset($a['created_at']) ? strtotime($a['created_at']) : 0;
+                                    $timeB = isset($b['created_at']) ? strtotime($b['created_at']) : 0;
+                                    return $timeB - $timeA;
+                                });
+                            } elseif ($filter === 'pending') {
+                                $donations_to_display = $pending_donations;
+                            } elseif ($filter === 'approved') {
+                                $donations_to_display = $approved_donations;
+                            }
+                            ?>
+                            <?php if (empty($donations_to_display)): ?>
+                                <tr><td colspan="9" class="py-4 text-center text-gray-600">No donations found for this filter.</td></tr>
+                            <?php else: ?>
+                                <?php foreach ($donations_to_display as $donation): ?>
+                                    <tr class="border-b last:border-b-0 hover:bg-gray-50">
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['id']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['description']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800">
+                                            <?php echo htmlspecialchars($donation['category_name'] ?? 'N/A'); ?> <!-- Display Category Name -->
+                                        </td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['quantity']) . ' ' . htmlspecialchars($donation['unit']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo htmlspecialchars($donation['donor_org']); ?></td>
+                                        <td class="py-3 px-4 text-sm text-gray-800"><?php echo date('Y-m-d H:i', strtotime($donation['expiry_time'])); ?></td>
+                                        <td class="py-3 px-4 text-sm">
+                                            <span class="status-tag <?php
+                                                $status_class = '';
+                                                switch ($donation['status']) {
+                                                    case 'pending': $status_class = 'status-pending'; break;
+                                                    case 'approved': $status_class = 'status-approved'; break;
+                                                    case 'rejected': $status_class = 'status-rejected'; break;
+                                                    case 'fulfilled': $status_class = 'status-fulfilled'; break;
+                                                }
+                                                echo $status_class;
+                                            ?>"><?php echo htmlspecialchars(ucfirst($donation['status'])); ?></span>
+                                        </td>
+                                        <td class="py-3 px-4 text-sm text-gray-800">
+                                            <?php if ($donation['status'] === 'rejected' && !empty($donation['rejection_reason'])): ?>
+                                                <span class="font-semibold">Reason:</span> <?php echo htmlspecialchars($donation['rejection_reason']); ?>
+                                            <?php else: ?>
+                                                <?php echo date('Y-m-d', strtotime($donation['created_at'])); ?>
+                                            <?php endif; ?>
+                                        </td>
+                                        <td class="py-3 px-4 text-sm">
+                                            <div class="flex flex-wrap gap-2">
+                                                <?php if ($donation['status'] === 'pending'): ?>
+                                                    <form method="POST" action="admin-panel.php?view=donations" class="inline-block">
+                                                        <input type="hidden" name="donation_id" value="<?php echo $donation['id']; ?>">
+                                                        <button type="submit" name="donation_action" value="approve_donation" class="bg-primary-green text-white px-3 py-1 rounded-md hover:bg-primary-green-dark transition-colors text-xs">Approve</button>
+                                                    </form>
+                                                    <!-- Reject button to open modal -->
+                                                    <button type="button" class="bg-red-500 text-white px-3 py-1 rounded-md hover:bg-red-600 transition-colors text-xs reject-donation-btn"
+                                                        data-donation-id="<?php echo $donation['id']; ?>"
+                                                        data-donation-desc="<?php echo htmlspecialchars($donation['description']); ?>">
+                                                        Reject
                                                     </button>
                                                 <?php endif; ?>
                                             </div>
@@ -1154,3 +1286,9 @@ if ($conn) {
     </script>
 </body>
 </html>
+
+
+
+
+
+
